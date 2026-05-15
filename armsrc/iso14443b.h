@@ -44,6 +44,7 @@ int iso14443b_apdu(uint8_t const *msg, size_t msg_len, bool send_chaining, void 
 int iso14443b_select_card(iso14b_card_select_t *card);
 
 void SimulateIso14443bTag(const uint8_t *pupi);
+void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_blocks, uint32_t field_check_ms, uint32_t flags, uint8_t static_chipid);
 void read_14b_st_block(uint8_t blocknr);
 int read_14b_srx_block(uint8_t blocknr, uint8_t *block);
 int iso14443b_select_srx_card(iso14b_card_select_t *card);

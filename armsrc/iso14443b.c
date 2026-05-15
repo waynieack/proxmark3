@@ -459,6 +459,13 @@ static struct {
     int      byteCntMax;
     int      posCnt;
     uint8_t  *output;
+    // Error counters for diagnostics (not reset per-frame, cumulative)
+    uint16_t errSOFShort;       // SOF zeros < 10 before high
+    uint16_t errSOFLong;        // SOF zeros > 12 without high
+    uint16_t errGapLong;        // inter-char gap > 50 samples
+    uint16_t errBadByte;        // bad start/stop bits in data byte
+    uint16_t errOverflow;       // receive buffer overflow
+    uint8_t  errGapByteCntLast; // byteCnt at most recent gap error (0=SOF→byte1, N=after Nth byte)
 } Uart;
 
 static void Uart14bReset(void) {
@@ -468,6 +475,7 @@ static void Uart14bReset(void) {
     Uart.byteCnt = 0;
     Uart.byteCntMax = MAX_FRAME_SIZE;
     Uart.posCnt = 0;
+    // Note: error counters are cumulative — not reset here.
 }
 
 static void Uart14bInit(uint8_t *data) {
@@ -592,6 +600,7 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
                         LED_A_ON(); // Indicate we got a valid SOF
                     } else {
                         // didn't stay down long enough before going high, error
+                        Uart.errSOFShort++;
                         Uart.state = STATE_14B_UNSYNCD;
                     }
                 } else {
@@ -607,6 +616,7 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
             if (Uart.bitCnt > 12) {
                 // Give up if we see too many zeros without a one, too.
                 LED_A_OFF();
+                Uart.errSOFLong++;
                 Uart.state = STATE_14B_UNSYNCD;
             }
             break;
@@ -616,10 +626,12 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
 
             if (bit) {
 
-                // max 57us between characters = 49 1/fs,
-                // max 3 etus after low phase of SOF = 24 1/fs
-                if (Uart.posCnt > 50 / 2) {
-                    // stayed high for too long between characters, error
+                // max 57us between characters = 49 1/fs (inter-character gap spec limit).
+                // Threshold 50 samples ≈ 118us gives comfortable margin above spec.
+                if (Uart.posCnt > 50) {
+                    // stayed high for too long, error
+                    Uart.errGapLong++;
+                    Uart.errGapByteCntLast = (uint8_t)Uart.byteCnt;
                     Uart.state = STATE_14B_UNSYNCD;
                 }
 
@@ -659,6 +671,7 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
                     if (Uart.byteCnt >= Uart.byteCntMax) {
                         // Buffer overflowed, give up
                         LED_A_OFF();
+                        Uart.errOverflow++;
                         Uart.state = STATE_14B_UNSYNCD;
                     } else {
                         // so get the next byte now
@@ -675,6 +688,7 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
                 } else {
                     // this is an error
                     LED_A_OFF();
+                    Uart.errBadByte++;
                     Uart.state = STATE_14B_UNSYNCD;
                 }
             }
@@ -2363,8 +2377,478 @@ void iso14443b_setup(void) {
     LED_D_ON();
 }
 
+// SRT512 chip_id helper.
+//
+// Generates a new chip_id value according to the requested mode:
+//   0 (FULL)   – randomize all 8 bits (used on INITIATE).
+//   1 (SLOT)   – keep the upper 4 bits (chip identity), randomize only the
+//                lower 4 bits (CHIP_SLOT_NUMBER).  Used on PCALL16 per spec.
+//   2 (STATIC) – return current_id unchanged (fixed chip_id option active).
+//
+// force_slot0 clips the slot nibble to 0 after any randomization, so the tag
+// always responds to PCALL16 at slot 0 (useful for testing / noisy environments).
+static uint8_t srt512_new_chipid(uint32_t *prng_state, uint8_t current_id,
+                                  uint8_t mode, bool force_slot0) {
+    uint8_t id;
+    switch (mode) {
+        case 1:  // random slot number only
+            *prng_state ^= *prng_state << 13;
+            *prng_state ^= *prng_state >> 17;
+            *prng_state ^= *prng_state << 5;
+            id = (current_id & 0xF0) | ((uint8_t)(*prng_state & 0x0F));
+            break;
+        case 2:  // static – no change
+            id = current_id;
+            break;
+        default: // 0: full random
+            *prng_state ^= *prng_state << 13;
+            *prng_state ^= *prng_state >> 17;
+            *prng_state ^= *prng_state << 5;
+            id = (uint8_t)(*prng_state & 0xFF);
+            break;
+    }
+    if (force_slot0)
+        id &= 0xF0;  // clear slot nibble → always slot 0
+    return id;
+}
+
+// Rebuild and re-encode the INITIATE and SELECT response buffers after chip_id changes.
+static void srt512_encode_chipid(uint8_t chip_id,
+                                  uint8_t *resp_init,   uint8_t *enc_init,   uint16_t enc_init_len,
+                                  uint8_t *resp_select, uint8_t *enc_select, uint16_t enc_select_len) {
+    resp_init[0]   = chip_id;  AddCrc14B(resp_init,   1);
+    resp_select[0] = chip_id;  AddCrc14B(resp_select, 1);
+    const tosend_t *ts = get_tosend();
+    CodeIso14443bAsTag(resp_init,   3);  memcpy(enc_init,   ts->buf, enc_init_len);
+    CodeIso14443bAsTag(resp_select, 3);  memcpy(enc_select, ts->buf, enc_select_len);
+}
+
+// SRI512 / SRT512 tag emulation.
+// Handles the SRx anticollision & memory commands so a reader sees a valid tag.
+void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_blocks,
+                       uint32_t field_check_ms, uint32_t flags, uint8_t static_chipid) {
+    if (field_check_ms == 0) field_check_ms = 10;
+
+    const bool force_slot0     = (flags & SRT512_FLAG_FORCE_SLOT0)   != 0;
+    const bool use_static_chipid = (flags & SRT512_FLAG_STATIC_CHIPID) != 0;
+
+    LED_A_ON();
+
+    // SRT512 has 16 user blocks (0-15) plus 1 system block (block 255 = mem_idx 16)
+    #define SRT512_MAX_BLOCKS 17
+
+    if (num_blocks > SRT512_MAX_BLOCKS)
+        num_blocks = SRT512_MAX_BLOCKS;
+
+    // Internal copy of the block data so we can simulate writes
+    uint8_t mem[SRT512_MAX_BLOCKS][ISO14B_BLOCK_SIZE];
+    memset(mem, 0xFF, sizeof(mem));
+    for (uint8_t i = 0; i < num_blocks; i++) {
+        memcpy(mem[i], blocks + (i * ISO14B_BLOCK_SIZE), ISO14B_BLOCK_SIZE);
+    }
+
+    // Build the 8-byte UID response: 8 bytes UID + 2 CRC bytes
+    uint8_t resp_uid[10];
+    memcpy(resp_uid, uid, 8);
+    AddCrc14B(resp_uid, 8);
+
+    // Check block 255 (system block, mem_idx 16) for a programmed fixed Chip_ID.
+    // Per spec: bits b7-b0 of the system area can hold a fixed 8-bit Chip_ID; when
+    // programmed (non-0xFF) the random chip_id function should be disabled.
+    // mem[16][1] holds the Fixed Chip_ID mask byte (0xFF = not programmed).
+    bool block255_fixed = (num_blocks >= 17) && (mem[16][1] != 0xFF);
+    bool chipid_static  = use_static_chipid || block255_fixed;
+    uint8_t fixed_chipid_val = block255_fixed ? mem[16][1] : static_chipid;
+
+    // XOR-shift PRNG seeded from UID for randomizing chip_id / slot number.
+    uint32_t prng = (uint32_t)uid[0] ^ ((uint32_t)uid[1] << 8) ^
+                    ((uint32_t)uid[2] << 16) ^ ((uint32_t)uid[3] << 24);
+    if (prng == 0) prng = 0xDEADBEEF;
+    // Advance once so first chip_id isn't raw uid[0]
+    prng ^= prng << 13; prng ^= prng >> 17; prng ^= prng << 5;
+
+    uint8_t chipid_mode = chipid_static ? 2 : 0;  // 0=full random, 1=slot only, 2=static
+
+    uint8_t chip_id = chipid_static
+                      ? fixed_chipid_val
+                      : srt512_new_chipid(&prng, 0, 0, force_slot0);
+
+    uint8_t resp_init[3]   = { chip_id, 0x00, 0x00 };
+    AddCrc14B(resp_init, 1);
+    uint8_t resp_select[3] = { chip_id, 0x00, 0x00 };
+    AddCrc14B(resp_select, 1);
+
+    // Setup device hardware
+    FpgaDownloadAndGo(FPGA_BITSTREAM_HF);
+    SetAdcMuxFor(GPIO_MUXSEL_HIPKD);
+    FpgaSetupSsc(FPGA_MAJOR_MODE_HF_SIMULATOR);
+
+    BigBuf_free();
+    BigBuf_Clear_ext(false);
+    clear_trace();
+    set_tracing(true);
+
+    const tosend_t *ts = get_tosend();
+
+    uint8_t *receivedCmd = BigBuf_calloc(MAX_FRAME_SIZE);
+
+    // Pre-encode all fixed responses once at startup (no re-encoding in the hot loop)
+    CodeIso14443bAsTag(resp_init, sizeof(resp_init));
+    uint8_t *enc_init = BigBuf_calloc(ts->max);
+    uint16_t enc_init_len = ts->max;
+    memcpy(enc_init, ts->buf, ts->max);
+
+    CodeIso14443bAsTag(resp_select, sizeof(resp_select));
+    uint8_t *enc_select = BigBuf_calloc(ts->max);
+    uint16_t enc_select_len = ts->max;
+    memcpy(enc_select, ts->buf, ts->max);
+
+    CodeIso14443bAsTag(resp_uid, sizeof(resp_uid));
+    uint8_t *enc_uid = BigBuf_calloc(ts->max);
+    uint16_t enc_uid_len = ts->max;
+    memcpy(enc_uid, ts->buf, ts->max);
+
+
+    // Temporary encode buffer reused for WRITE_BLK ACK (3 bytes max)
+    uint8_t *enc_temp = BigBuf_calloc(ts->max);
+
+    if (g_dbglevel >= DBG_INFO) {
+        Dbprintf("SRT512 emulator started. chip_id=%02X blocks=%d static=%d slot0=%d",
+                 chip_id, num_blocks, (int)chipid_static, (int)force_slot0);
+        Dbhexdump(8, uid, false);
+    }
+
+    // Tag state machine:
+    //   0 = power-off / no field
+    //   1 = READY      — field present; only INITIATE accepted
+    //   2 = INVENTORY  — responded to INITIATE; PCALL16/SLOT_MARKER/SELECT valid
+    //   3 = SELECTED   — responded to SELECT with matching chip_id
+    //   4 = DESELECTED — wrong chip_id SELECT received; only SELECT valid
+    int tagState = 0;
+    uint16_t len = 0;
+    uint16_t cmdsReceived = 0;
+
+    // Start in RX mode; init the software UART for the first receive.
+    LED_D_OFF();
+    FpgaWriteConfWord(FPGA_MAJOR_MODE_HF_SIMULATOR | FPGA_HF_SIMULATOR_NO_MODULATION);
+    Uart14bInit(receivedCmd);
+
+    // Hardware-timer-based field-loss detection.
+    // SumAdc(32) takes ~640 us, so we only call it every field_check_ms milliseconds.
+    uint32_t field_check_tick = GetTickCount();
+    // SSC byte counter for LogTrace timestamps.
+    // Tag-simulation SSP_CLK = 13.56MHz/32 = 423.75kHz → 1 byte = 8 clocks = 256 FC.
+    uint32_t ssp_count = 0;
+    uint32_t frame_start_ssp = 0;  // ssp_count at start of current reader frame
+
+    while (BUTTON_PRESS() == false) {
+        WDT_HIT();
+
+        if (data_available()) break;
+
+        // Non-blocking SSC byte read.
+        if (!(AT91C_BASE_SSC->SSC_SR & AT91C_SSC_RXRDY)) {
+            // Only run field-loss check while we have a field (tagState != 0).
+            // Timer is suspended (UINT32_MAX) after a loss until INITIATE resets it.
+            if (tagState == 0) continue;
+            if (GetTickCountDelta(field_check_tick) < field_check_ms) continue;
+            field_check_tick = GetTickCount();
+
+            // Use 2 samples instead of 32: each ADC conversion at 375kHz takes
+            // ~64us, so 32 samples = ~2ms which can swallow an entire INITIATE
+            // frame (~700us).  2 samples = ~128us, well under one frame.
+            // Scaling: max sum for N=2 is 2*1023=2046~2^11, so shift by 11.
+            int vHf = (MAX_ADC_HF_VOLTAGE * SumAdc(ADC_CHAN_HF, 2)) >> 11;
+            if (vHf < MF_MINFIELDV) {
+                if (g_dbglevel >= DBG_DEBUG)
+                    Dbprintf("SRT512: field lost (vHf=%d)", vHf);
+                tagState = 0;
+                LED_A_OFF();
+                Uart14bInit(receivedCmd);  // reset UART for when field returns
+                // Suspend timer until INITIATE arrives.
+                field_check_tick = UINT32_MAX;
+            }
+            continue;
+        }
+
+        // Got a byte — feed it into the software UART bit-by-bit.
+        // NOTE: do NOT reset no_rxrdy_ctr here. The FPGA SSC runs off an internal
+        // 424 kHz clock (not the carrier), so SSC_RXRDY fires constantly even with
+        // no field. Resetting here would prevent the counter from ever reaching
+        // 500 000, making the vHf field-loss check unreachable.
+        uint8_t rx_byte = (uint8_t)AT91C_BASE_SSC->SSC_RHR;
+        ssp_count++;
+        bool frame_done = false;
+        if (Uart.state == STATE_14B_UNSYNCD) {
+            frame_start_ssp = ssp_count;
+        }
+        for (uint8_t mask = 0x80; mask != 0x00; mask >>= 1) {
+            if (Handle14443bSampleFromReader(rx_byte & mask)) {
+                len = Uart.byteCnt;
+                frame_done = true;
+                break;
+            }
+        }
+        if (!frame_done) continue;
+
+        // Complete frame received — log it with SSC-derived timestamps.
+        // 1 SSP byte = 256 FC at tag-simulation rate (13.56MHz/32 clock).
+        uint32_t rx_start_fc = frame_start_ssp * 256U;
+        uint32_t rx_end_fc   = ssp_count       * 256U;
+        LogTrace(receivedCmd, len, rx_start_fc, rx_end_fc, NULL, true);
+        frame_start_ssp = ssp_count;  // reset for next frame
+
+        if (len < 3) {
+            if (g_dbglevel >= DBG_DEBUG)
+                Dbprintf("SRT512: short frame len=%d, ignored", len);
+            goto srt512_next_frame;
+        }
+
+        if (check_crc(CRC_14443_B, receivedCmd, len) == false) {
+            if (g_dbglevel >= DBG_DEBUG)
+                Dbprintf("SRT512: CRC fail cmd=%02X len=%d errs sof_s=%d sof_l=%d gap=%d bad=%d ovf=%d",
+                         receivedCmd[0], len,
+                         Uart.errSOFShort, Uart.errSOFLong,
+                         Uart.errGapLong, Uart.errBadByte, Uart.errOverflow);
+            goto srt512_next_frame;
+        }
+
+        uint8_t cmd_byte = receivedCmd[0];
+
+        if (tagState == 0 || tagState == 1 ) {
+            // ---- READY state (tagState 1) or no-field state (tagState 0) ----
+            // Per spec: only INITIATE is accepted; anything else is silently ignored.
+            // If we receive INITIATE while tagState == 0 the field must have returned
+            // (reader is powering it up), so treat it as field-detected + INITIATE.
+            if (cmd_byte == ISO14443B_INITIATE && receivedCmd[1] == 0x00 && len == 4) {
+                if (tagState == 0) {
+                    // Field returned — detected via incoming command, not ADC.
+                    LED_A_ON();
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [OFF] field detected via INITIATE -> READY");
+                }
+                chip_id = srt512_new_chipid(&prng, chip_id, chipid_mode, force_slot0);
+                srt512_encode_chipid(chip_id, resp_init, enc_init, enc_init_len,
+                                              resp_select, enc_select, enc_select_len);
+                TransmitFor14443b_AsTag(enc_init, enc_init_len);
+                ssp_count += enc_init_len;
+                LogTrace(resp_init, sizeof(resp_init), rx_end_fc, ssp_count * 256U, NULL, false);
+                // Delay next field check by 50ms to cover the INITIATE→SELECT gap.
+                field_check_tick = GetTickCount() - field_check_ms + 50U;
+                tagState = 2;  // advance to INVENTORY
+                if (g_dbglevel >= DBG_DEBUG)
+                    Dbprintf("SRT512: [READY] INITIATE chip_id=%02X slot=%d -> INVENTORY", chip_id, chip_id & 0x0F);
+            } else {
+                if (g_dbglevel >= DBG_DEBUG)
+                    Dbprintf("SRT512: [READY] ignored cmd=%02X len=%d", cmd_byte, len);
+            }
+
+        } else if (tagState == 2) {
+            // ---- INVENTORY state (tagState == 2) ----
+            // INITIATE, PCALL16, SLOT_MARKER, SELECT are valid.
+
+            if (cmd_byte == ISO14443B_INITIATE && receivedCmd[1] == 0x00 && len == 4) {
+                // Full chip_id re-randomization on INITIATE.
+                chip_id = srt512_new_chipid(&prng, chip_id, chipid_mode, force_slot0);
+                srt512_encode_chipid(chip_id, resp_init, enc_init, enc_init_len,
+                                              resp_select, enc_select, enc_select_len);
+                TransmitFor14443b_AsTag(enc_init, enc_init_len);
+                ssp_count += enc_init_len;
+                LogTrace(resp_init, sizeof(resp_init), rx_end_fc, ssp_count * 256U, NULL, false);
+                if (g_dbglevel >= DBG_DEBUG)
+                    Dbprintf("SRT512: [INVENTORY] INITIATE chip_id=%02X slot=%d", chip_id, chip_id & 0x0F);
+
+            } else if (cmd_byte == ISO14443B_INITIATE && receivedCmd[1] == 0x04 && len == 4) {
+                // PCALL16: per spec, only the 4-bit CHIP_SLOT_NUMBER is re-randomized;
+                // the upper nibble (chip identity) stays the same.
+                chip_id = srt512_new_chipid(&prng, chip_id,
+                                            chipid_static ? 2 : 1,  // static→no change; else slot-only
+                                            force_slot0);
+                srt512_encode_chipid(chip_id, resp_init, enc_init, enc_init_len,
+                                              resp_select, enc_select, enc_select_len);
+                if ((chip_id & 0x0F) == 0) {
+                    TransmitFor14443b_AsTag(enc_init, enc_init_len);
+                    ssp_count += enc_init_len;
+                    LogTrace(resp_init, sizeof(resp_init), rx_end_fc, ssp_count * 256U, NULL, false);
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [INVENTORY] PCALL16 chip_id=%02X slot=0 responded", chip_id);
+                } else {
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [INVENTORY] PCALL16 chip_id=%02X slot=%d waiting for SLOT_MARKER", chip_id, chip_id & 0x0F);
+                }
+
+            } else if ((cmd_byte & 0x0F) == 0x06 && cmd_byte != 0x06 && len == 3) {
+                // SLOT_MARKER(N): respond only if CHIP_SLOT_NUMBER matches N.
+                uint8_t slot_n = cmd_byte >> 4;
+                if ((chip_id & 0x0F) == slot_n) {
+                    TransmitFor14443b_AsTag(enc_init, enc_init_len);
+                    ssp_count += enc_init_len;
+                    LogTrace(resp_init, sizeof(resp_init), rx_end_fc, ssp_count * 256U, NULL, false);
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [INVENTORY] SLOT_MARKER(%d) responded chip_id=%02X", slot_n, chip_id);
+                } else {
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [INVENTORY] SLOT_MARKER(%d) silent (our slot=%d)", slot_n, chip_id & 0x0F);
+                }
+
+            } else if (cmd_byte == ISO14443B_SELECT && len == 4) {
+                if (receivedCmd[1] == chip_id) {
+                    TransmitFor14443b_AsTag(enc_select, enc_select_len);
+                    ssp_count += enc_select_len;
+                    LogTrace(resp_select, sizeof(resp_select), rx_end_fc, ssp_count * 256U, NULL, false);
+                    tagState = 3;  // SELECTED
+                    // Delay next field check by 50ms to cover the SELECT→GET_UID gap.
+                    field_check_tick = GetTickCount() - field_check_ms + 50U;
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [INVENTORY] SELECT chip_id=%02X ok -> SELECTED", chip_id);
+                } else {
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [INVENTORY] SELECT wrong chip_id=%02X (want %02X)",
+                                 receivedCmd[1], chip_id);
+                }
+
+            } else {
+                if (g_dbglevel >= DBG_DEBUG)
+                    Dbprintf("SRT512: [INVENTORY] ignored cmd=%02X len=%d", cmd_byte, len);
+            }
+        } else if (tagState == 3) {
+            // ---- SELECTED state ----
+            // Only responds to GET_UID, READ_BLOCK, WRITE_BLOCK.
+            // Per spec: INITIATE/PCALL16/SLOT_MARKER are silently ignored.
+            // SELECT with wrong chip_id → DESELECTED; correct chip_id → stay SELECTED.
+            // RESET_TO_INVENTORY → back to INVENTORY.
+            // COMPLETION → READY
+
+            if (cmd_byte == ISO14443B_GET_UID && len == 3) {
+                TransmitFor14443b_AsTag(enc_uid, enc_uid_len);
+                ssp_count += enc_uid_len;
+                LogTrace(resp_uid, sizeof(resp_uid), rx_end_fc, ssp_count * 256U, NULL, false);
+                if (g_dbglevel >= DBG_DEBUG)
+                    Dbprintf("SRT512: [SELECTED] GET_UID");
+
+            } else if (cmd_byte == ISO14443B_READ_BLK && len == 4) {
+                uint8_t blkno = receivedCmd[1];
+                uint8_t mem_idx = (blkno == 0xFF) ? 16 : blkno;
+                if (mem_idx < SRT512_MAX_BLOCKS) {
+                    uint8_t blkbuf[6];
+                    memcpy(blkbuf, mem[mem_idx], ISO14B_BLOCK_SIZE);
+                    AddCrc14B(blkbuf, ISO14B_BLOCK_SIZE);
+                    CodeIso14443bAsTag(blkbuf, sizeof(blkbuf));
+                    memcpy(enc_temp, ts->buf, ts->max);
+                    TransmitFor14443b_AsTag(enc_temp, ts->max);
+                    ssp_count += ts->max;
+                    LogTrace(blkbuf, sizeof(blkbuf), rx_end_fc, ssp_count * 256U, NULL, false);
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [SELECTED] READ_BLOCK blk=%02X (idx=%d)", blkno, mem_idx);
+                } else {
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [SELECTED] READ_BLOCK blk=%02X out of range (ignored)", blkno);
+                }
+
+            } else if (cmd_byte == ISO14443B_WRITE_BLK && len == 8) {
+                // No response per spec sec 8.8
+                uint8_t blkno = receivedCmd[1];
+                if (blkno < 16) {
+                    memcpy(mem[blkno], receivedCmd + 2, ISO14B_BLOCK_SIZE);
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [SELECTED] WRITE_BLOCK blk=%02X d=%02X%02X%02X%02X",
+                                 blkno, mem[blkno][0], mem[blkno][1], mem[blkno][2], mem[blkno][3]);
+                }
+
+            } else if (cmd_byte == ISO14443B_SELECT && len == 4) {
+                // SELECT with correct chip_id → stay SELECTED
+                // SELECT with wrong chip_id → DESELECTED (back to INVENTORY)
+                if (receivedCmd[1] == chip_id) {
+                    TransmitFor14443b_AsTag(enc_select, enc_select_len);
+                    ssp_count += enc_select_len;
+                    LogTrace(resp_select, sizeof(resp_select), rx_end_fc, ssp_count * 256U, NULL, false);
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [SELECTED] SELECT (re-select) chip_id=%02X ok", chip_id);
+                } else {
+                    tagState = 4;  // DESELECTED
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [SELECTED] SELECT wrong chip_id=%02X -> DESELECTED", receivedCmd[1]);
+                }
+
+            } else if (cmd_byte == ISO14443B_RESET && len == 3) {
+                // RESET_TO_INVENTORY: → INVENTORY, no response
+                tagState = 2;  // INVENTORY
+                if (g_dbglevel >= DBG_DEBUG)
+                    Dbprintf("SRT512: [SELECTED] RESET_TO_INVENTORY -> INVENTORY");
+
+            } else if (cmd_byte == ISO14443B_COMPLETION && len == 3) {
+                // COMPLETION: → READY, no response
+                tagState = 1;  // READY
+                if (g_dbglevel >= DBG_DEBUG)
+                    Dbprintf("SRT512: [SELECTED] COMPLETION -> READY");
+
+            } else {
+                // INITIATE, PCALL16, SLOT_MARKER — all silently ignored when SELECTED.
+                if (g_dbglevel >= DBG_DEBUG)
+                    Dbprintf("SRT512: [SELECTED] ignored cmd=%02X len=%d", cmd_byte, len);
+            }
+        } else if (tagState == 4) {
+            // ---- DESELECTED state (tagState == 4) ----
+            // Only SELECT is valid.
+
+            if (cmd_byte == ISO14443B_SELECT && len == 4) {
+                // SELECT with correct chip_id → SELECTED
+                // SELECT with wrong chip_id → DESELECTED (Do Nothing)
+                if (receivedCmd[1] == chip_id) {
+                    TransmitFor14443b_AsTag(enc_select, enc_select_len);
+                    ssp_count += enc_select_len;
+                    LogTrace(resp_select, sizeof(resp_select), rx_end_fc, ssp_count * 256U, NULL, false);
+                    tagState = 3;  // SELECTED
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [DESELECTED] chip_id=%02X ok -> SELECTED", chip_id);
+                } else {
+                    if (g_dbglevel >= DBG_DEBUG)
+                        Dbprintf("SRT512: [DESELECTED] wrong chip_id=%02X -> ignored", receivedCmd[1]);
+                }
+            
+            } else {
+                // All commands ignored while deselected except SELECT with correct chip_id, which moves us back to SELECTED.
+                if (g_dbglevel >= DBG_DEBUG)
+                    Dbprintf("SRT512: [DESELECTED] ignored cmd=%02X len=%d", cmd_byte, len);
+            }
+        } else {
+            // This should not happen, but if it does, reset to READY state.
+            tagState = 1;  // READY
+            if (g_dbglevel >= DBG_DEBUG)
+                Dbprintf("SRT512: [UNKNOWN STATE] ignored cmd=%02X len=%d -> READY", cmd_byte, len);
+        }
+
+        ++cmdsReceived;
+
+srt512_next_frame:
+        // Wait for the SSC shift register to fully clock out the last byte
+        // before switching FPGA back to RX mode.  TXRDY fires when the holding
+        // register is free but the last byte is still shifting at 106 kbps
+        // (~75 us/byte).  Switching to NO_MODULATION before TXEMPTY truncates
+        // the end of every response.  Debug Dbprintf() calls were accidentally
+        // providing this delay, masking the bug when debugs were enabled.
+        while (!(AT91C_BASE_SSC->SSC_SR & AT91C_SSC_TXEMPTY)) {};
+        LED_D_OFF();
+        FpgaWriteConfWord(FPGA_MAJOR_MODE_HF_SIMULATOR | FPGA_HF_SIMULATOR_NO_MODULATION);
+        // Delay next field check by 50ms after every TX so we don't sample vHf
+        // in the brief quiet window while the reader is processing our response.
+        // The reader's inter-frame gap is ~47ms, so 50ms clears it safely.
+        field_check_tick = GetTickCount() - field_check_ms + 50U;
+        Uart14bInit(receivedCmd);
+        len = 0;
+    }
+
+    if (g_dbglevel >= DBG_DEBUG)
+        Dbprintf("SRT512 emulator stopped. cmds=%d trace=%d errs sof_s=%d sof_l=%d gap=%d(bc=%d) bad=%d ovf=%d",
+             cmdsReceived, BigBuf_get_traceLen(),
+             Uart.errSOFShort, Uart.errSOFLong,
+             Uart.errGapLong, Uart.errGapByteCntLast,
+             Uart.errBadByte, Uart.errOverflow);
+
+    switch_off();
+}
+
 //-----------------------------------------------------------------------------
-// Read a SRI512 ISO 14443B tag.
 //
 // SRI512 tags are just simple memory tags, here we're looking at making a dump
 // of the contents of the memory. No anticollision algorithm is done, we assume

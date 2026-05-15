@@ -1025,6 +1025,117 @@ static int CmdHF14BSim(const char *Cmd) {
     return PM3_SUCCESS;
 }
 
+static int CmdHF14BSriSim(const char *Cmd) {
+
+    CLIParserContext *ctx;
+    CLIParserInit(&ctx, "hf 14b simsrx",
+                  "Simulate a SRI512/SRT512 ISO-14443-B tag using a dump file.\n"
+                  "Blocks 5 and 6 are the counters. The tag will respond to INITIATE,\n"
+                  "SELECT, GET_UID, READ_BLK and WRITE_BLK commands.\n"
+                  "Use -c to tune the field-loss detection interval (ms).\n"
+                  "Use -s to force a fixed 8-bit Chip_ID (hex, e.g. A0).\n"
+                  "Use -0 to force slot 0 (tag always responds to PCALL16 immediately).",
+                  "hf 14b simsrx -f hf-14b-D002325D27D47C2A-dump.json\n"
+                  "hf 14b simsrx -f hf-14b-D002325D27D47C2A-dump.json -c 50\n"
+                  "hf 14b simsrx -f hf-14b-D002325D27D47C2A-dump.json -s A0\n"
+                  "hf 14b simsrx -f hf-14b-D002325D27D47C2A-dump.json -0"
+                 );
+
+    void *argtable[] = {
+        arg_param_begin,
+        arg_str1("f", "file",         "<fn>",  "Filename of dump (bin/eml/json)"),
+        arg_int0("c", "chkms",        "<ms>",  "Field-loss check interval in milliseconds (default 50)"),
+        arg_str0("s", "static-chipid","<hex>", "Use a fixed 8-bit Chip_ID value (disables random, e.g. A0)"),
+        arg_lit0("0", "slot0",                 "Force slot 0 — tag always responds to PCALL16 at slot 0"),
+        arg_param_end
+    };
+    CLIExecWithReturn(ctx, Cmd, argtable, false);
+
+    int fnlen = 0;
+    char filename[FILE_PATH_SIZE] = {0};
+    CLIParamStrToBuf(arg_get_str(ctx, 1), (uint8_t *)filename, FILE_PATH_SIZE, &fnlen);
+    int field_check_ms = arg_get_int_def(ctx, 2, 50);
+
+    // Parse optional static chip_id
+    uint32_t flags = 0;
+    uint8_t  static_chipid = 0;
+    int scidlen = 0;
+    char scid_str[8] = {0};
+    CLIParamStrToBuf(arg_get_str(ctx, 3), (uint8_t *)scid_str, sizeof(scid_str), &scidlen);
+    if (scidlen > 0) {
+        static_chipid = (uint8_t)strtoul(scid_str, NULL, 16);
+        flags |= SRT512_FLAG_STATIC_CHIPID;
+    }
+    if (arg_get_lit(ctx, 4))
+        flags |= SRT512_FLAG_FORCE_SLOT0;
+
+    CLIParserFree(ctx);
+
+    if (fnlen == 0) {
+        PrintAndLogEx(ERR, "No filename provided");
+        return PM3_EINVARG;
+    }
+
+    // SRT512: 16 user blocks + 1 system block (block 16)
+    const int block_cnt = 16;
+
+    uint8_t *data = NULL;
+    size_t bytes_read = 0;
+    int res = pm3_load_dump(filename, (void **)&data, &bytes_read, (ST25TB_SR_BLOCK_SIZE * (block_cnt + 1)));
+    if (res != PM3_SUCCESS) {
+        PrintAndLogEx(FAILED, "Failed to load dump file");
+        return res;
+    }
+
+    if (bytes_read < (size_t)(block_cnt * ST25TB_SR_BLOCK_SIZE)) {
+        PrintAndLogEx(ERR, "Dump file too small, need at least %d bytes", block_cnt * ST25TB_SR_BLOCK_SIZE);
+        free(data);
+        return PM3_EFILE;
+    }
+
+    // Determine actual number of blocks loaded (may include system block 16)
+    uint8_t num_blocks = (uint8_t)(bytes_read / ST25TB_SR_BLOCK_SIZE);
+    if (num_blocks > 17) num_blocks = 17;
+
+    // Extract UID from filename (hf-14b-<UID>-dump.json format)
+    uint8_t *uid = get_uid_from_filename(filename);
+
+    PrintAndLogEx(INFO, "Simulating SRT512 tag...");
+    PrintAndLogEx(INFO, "      UID: " _GREEN_("%s"), sprint_hex(uid, 8));
+    PrintAndLogEx(INFO, "   Blocks: %d loaded", num_blocks);
+    if (flags & SRT512_FLAG_STATIC_CHIPID)
+        PrintAndLogEx(INFO, "  Chip_ID: static 0x%02X", static_chipid);
+    else if (flags & SRT512_FLAG_FORCE_SLOT0)
+        PrintAndLogEx(INFO, "  Chip_ID: random, forced slot 0");
+    else
+        PrintAndLogEx(INFO, "  Chip_ID: fully random");
+    PrintAndLogEx(INFO, "   Field-loss check: %d ms", field_check_ms);
+    PrintAndLogEx(INFO, "Press " _GREEN_("pm3 button") " to abort simulation");
+
+    // Build payload: 8 bytes UID + num_blocks*4 bytes block data
+    size_t payload_len = 8 + num_blocks * ST25TB_SR_BLOCK_SIZE;
+    uint8_t *payload = (uint8_t *)calloc(payload_len, sizeof(uint8_t));
+    if (payload == NULL) {
+        PrintAndLogEx(ERR, "Failed to allocate memory");
+        free(data);
+        return PM3_EMALLOC;
+    }
+
+    memcpy(payload, uid, 8);
+    memcpy(payload + 8, data, num_blocks * ST25TB_SR_BLOCK_SIZE);
+    free(data);
+
+    clearCommandBuffer();
+    // oldarg[0] = field_check_ms, oldarg[1] = flags, oldarg[2] = static_chipid
+    SendCommandMIX(CMD_HF_ISO14443B_SIM_SRX,
+                   (uint64_t)(uint32_t)field_check_ms,
+                   (uint64_t)flags,
+                   (uint64_t)static_chipid,
+                   payload, (uint16_t)payload_len);
+    free(payload);
+    return PM3_SUCCESS;
+}
+
 static int CmdHF14BSniff(const char *Cmd) {
 
     CLIParserContext *ctx;
@@ -3135,6 +3246,7 @@ static command_t CommandTable[] = {
     {"reader",    CmdHF14BReader,      IfPm3Iso14443b,  "Act as a ISO-14443-B reader to identify a tag"},
     {"restore",   CmdHF14BRestore,     IfPm3Iso14443b,  "Restore from file to all memory pages of an ISO-14443-B tag"},
     {"sim",       CmdHF14BSim,         IfPm3Iso14443b,  "Fake ISO ISO-14443-B tag"},
+    {"simsrx",    CmdHF14BSriSim,      IfPm3Iso14443b,  "Simulate a SRI512/SRT512 tag from dump file"},
     {"sniff",     CmdHF14BSniff,       IfPm3Iso14443b,  "Eavesdrop ISO-14443-B"},
     {"wrbl",      CmdHF14BSriWrbl,     IfPm3Iso14443b,  "Write data to a SRI512/SRIX4 tag"},
     {"tearoff",   CmdHF14BSriTearoff,  IfPm3Iso14443b,  "Tear-off attack on ST25TB/SRx counter blocks"},
