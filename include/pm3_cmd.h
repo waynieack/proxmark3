@@ -781,9 +781,10 @@ typedef struct {
 #define CMD_HF_ISO14443B_SET_CONFIG 0x03D2
 #define CMD_HF_ISO14443B_ST25TB_TEAROFF 0x03D3
 #define CMD_HF_ISO14443B_SIM_SRX        0x03D4
-// Flags for CMD_HF_ISO14443B_SIM_SRX (oldarg[1])
+// Flags for CMD_HF_ISO14443B_SIM_SRX (oldarg[0])
 #define SRT512_FLAG_FORCE_SLOT0    (1u << 0)  // always use slot 0 after chip_id randomization
 #define SRT512_FLAG_STATIC_CHIPID  (1u << 1)  // disable random chip_id; use oldarg[2] value
+#define SRT512_FLAG_NO_FIELD_LOSS  (1u << 2)  // disable field-loss detection (for always-on readers)
 
 // For measurements of the antenna tuning
 #define CMD_MEASURE_ANTENNA_TUNING 0x0400

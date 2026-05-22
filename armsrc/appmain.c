@@ -1750,16 +1750,14 @@ static void PacketReceived(PacketCommandNG *packet) {
         }
         case CMD_HF_ISO14443B_SIM_SRX: {
             // payload: 8 bytes UID + N*4 bytes block data (blocks 0..N-1, max 17)
-            // oldarg[0] = field_check_ms (vHf poll interval in ms, 0=default 10ms)
-            // oldarg[1] = flags (SRT512_FLAG_FORCE_SLOT0, SRT512_FLAG_STATIC_CHIPID)
-            // oldarg[2] = static_chipid byte (used when SRT512_FLAG_STATIC_CHIPID set)
+            // oldarg[0] = flags (SRT512_FLAG_FORCE_SLOT0, SRT512_FLAG_STATIC_CHIPID)
+            // oldarg[1] = static_chipid byte (used when SRT512_FLAG_STATIC_CHIPID set)
             uint8_t *uid = packet->data.asBytes;
             uint8_t *blocks = packet->data.asBytes + 8;
             uint8_t num_blocks = (packet->length - 8) / 4;
-            uint32_t field_check_ms = (uint32_t)packet->oldarg[0];
-            uint32_t flags          = (uint32_t)packet->oldarg[1];
-            uint8_t  static_chipid  = (uint8_t)packet->oldarg[2];
-            SimulateSRT512Tag(uid, blocks, num_blocks, field_check_ms, flags, static_chipid);
+            uint32_t flags          = (uint32_t)packet->oldarg[0];
+            uint8_t  static_chipid  = (uint8_t)packet->oldarg[1];
+            SimulateSRT512Tag(uid, blocks, num_blocks, flags, static_chipid);
             break;
         }
         case CMD_HF_ISO14443B_COMMAND: {

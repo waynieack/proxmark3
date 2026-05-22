@@ -459,13 +459,6 @@ static struct {
     int      byteCntMax;
     int      posCnt;
     uint8_t  *output;
-    // Error counters for diagnostics (not reset per-frame, cumulative)
-    uint16_t errSOFShort;       // SOF zeros < 10 before high
-    uint16_t errSOFLong;        // SOF zeros > 12 without high
-    uint16_t errGapLong;        // inter-char gap > 50 samples
-    uint16_t errBadByte;        // bad start/stop bits in data byte
-    uint16_t errOverflow;       // receive buffer overflow
-    uint8_t  errGapByteCntLast; // byteCnt at most recent gap error (0=SOF→byte1, N=after Nth byte)
 } Uart;
 
 static void Uart14bReset(void) {
@@ -475,7 +468,6 @@ static void Uart14bReset(void) {
     Uart.byteCnt = 0;
     Uart.byteCntMax = MAX_FRAME_SIZE;
     Uart.posCnt = 0;
-    // Note: error counters are cumulative — not reset here.
 }
 
 static void Uart14bInit(uint8_t *data) {
@@ -586,38 +578,27 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
             break;
 
         case STATE_14B_GOT_FALLING_EDGE_OF_SOF:
-            Uart.posCnt++;
-
-            if (Uart.posCnt == 2) { // sample every 4 1/fs in the middle of a bit
-
-                if (bit) {
-                    if (Uart.bitCnt > 9) {
-                        // we've seen enough consecutive
-                        // zeros that it's a valid SOF
-                        Uart.posCnt = 0;
-                        Uart.byteCnt = 0;
-                        Uart.state = STATE_14B_AWAITING_START_BIT;
-                        LED_A_ON(); // Indicate we got a valid SOF
-                    } else {
-                        // didn't stay down long enough before going high, error
-                        Uart.errSOFShort++;
-                        Uart.state = STATE_14B_UNSYNCD;
-                    }
-                } else {
-                    // do nothing, keep waiting
+            if (!bit) {
+                Uart.bitCnt++;              // count every zero sample directly
+                if (Uart.bitCnt > 56) {    // > 14 ETUs of zeros — stuck low, give up
+                    LED_A_OFF();
+                    Uart.state = STATE_14B_UNSYNCD;
                 }
-                Uart.bitCnt++;
-            }
-
-            if (Uart.posCnt >= 4) {
-                Uart.posCnt = 0;
-            }
-
-            if (Uart.bitCnt > 12) {
-                // Give up if we see too many zeros without a one, too.
-                LED_A_OFF();
-                Uart.errSOFLong++;
-                Uart.state = STATE_14B_UNSYNCD;
+            } else {
+                // rising edge — validate zero run length
+                // Need >= 37 zero samples (>9.25 ETUs) to guarantee this is a real SOF:
+                // a data byte 0x00 produces start(4)+data(32) = 36 zeros → bitCnt=35,
+                // which would pass a >= 31 check and cause a false SOF.
+                // A real 10-ETU SOF produces 40 zeros → bitCnt=39. Threshold of 37
+                // sits cleanly between them with a 2-sample margin on each side.
+                if (Uart.bitCnt >= 31) {
+                    Uart.posCnt = 0;
+                    Uart.byteCnt = 0;
+                    Uart.state = STATE_14B_AWAITING_START_BIT;
+                    LED_A_ON();
+                } else {
+                    Uart.state = STATE_14B_UNSYNCD;
+                }
             }
             break;
 
@@ -626,12 +607,17 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
 
             if (bit) {
 
-                // max 57us between characters = 49 1/fs (inter-character gap spec limit).
-                // Threshold 50 samples ≈ 118us gives comfortable margin above spec.
-                if (Uart.posCnt > 50) {
-                    // stayed high for too long, error
-                    Uart.errGapLong++;
-                    Uart.errGapByteCntLast = (uint8_t)Uart.byteCnt;
+                // max 57us between characters = 49 1/fs,
+                // max 3 etus after low phase of SOF = 24 1/fs
+                //if (Uart.posCnt > 50 / 2) {
+                // While waiting for byte-1 after SOF (byteCnt==0), keep timeout
+                // tighter to escape false SOFs quickly.
+                // Once inside frame data (byteCnt>0), keep a looser timeout to
+                // tolerate real reader inter-byte jitter.
+                int gap_limit = (Uart.byteCnt == 0) ? 25 : 50;
+                if (Uart.posCnt > gap_limit) {
+
+                    // stayed high for too long between characters, error
                     Uart.state = STATE_14B_UNSYNCD;
                 }
 
@@ -671,7 +657,6 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
                     if (Uart.byteCnt >= Uart.byteCntMax) {
                         // Buffer overflowed, give up
                         LED_A_OFF();
-                        Uart.errOverflow++;
                         Uart.state = STATE_14B_UNSYNCD;
                     } else {
                         // so get the next byte now
@@ -688,7 +673,7 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
                 } else {
                     // this is an error
                     LED_A_OFF();
-                    Uart.errBadByte++;
+
                     Uart.state = STATE_14B_UNSYNCD;
                 }
             }
@@ -761,6 +746,12 @@ static void TransmitFor14443b_AsTag(const uint8_t *response, uint16_t len) {
             }
         }
     }
+    // Wait for the SSC shift register to fully clock out the last byte
+    // before switching FPGA back to RX mode.  TXRDY fires when the holding
+    // register is free but the last byte is still shifting at 106 kbps
+    // (~75 us/byte).  Switching to NO_MODULATION before TXEMPTY truncates
+    // the end of every response.
+    while (!(AT91C_BASE_SSC->SSC_SR & AT91C_SSC_TXEMPTY)) {};
 }
 //-----------------------------------------------------------------------------
 // Main loop of simulated tag: receive commands from reader, decide what
@@ -2423,14 +2414,21 @@ static void srt512_encode_chipid(uint8_t chip_id,
     CodeIso14443bAsTag(resp_select, 3);  memcpy(enc_select, ts->buf, enc_select_len);
 }
 
+// Global debug FIFO for SOF phase-slip tracing (raw SSC bytes).
+//#define SRT512_SOF_FIFO_BYTES 256
+//static uint8_t g_srt512_byte_fifo[SRT512_SOF_FIFO_BYTES];
+//static uint16_t g_srt512_byte_head = 0;
+
 // SRI512 / SRT512 tag emulation.
 // Handles the SRx anticollision & memory commands so a reader sees a valid tag.
-void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_blocks,
-                       uint32_t field_check_ms, uint32_t flags, uint8_t static_chipid) {
-    if (field_check_ms == 0) field_check_ms = 10;
 
-    const bool force_slot0     = (flags & SRT512_FLAG_FORCE_SLOT0)   != 0;
-    const bool use_static_chipid = (flags & SRT512_FLAG_STATIC_CHIPID) != 0;
+void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_blocks,
+                    uint32_t flags, uint8_t static_chipid) {
+
+    const bool force_slot0       = (flags & SRT512_FLAG_FORCE_SLOT0)   != 0;
+    const bool use_static_chipid  = (flags & SRT512_FLAG_STATIC_CHIPID) != 0;
+    const bool no_field_loss      = (flags & SRT512_FLAG_NO_FIELD_LOSS) != 0;
+    const bool skip_ready = 0;
 
     LED_A_ON();
 
@@ -2459,6 +2457,7 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
     bool block255_fixed = (num_blocks >= 17) && (mem[16][1] != 0xFF);
     bool chipid_static  = use_static_chipid || block255_fixed;
     uint8_t fixed_chipid_val = block255_fixed ? mem[16][1] : static_chipid;
+
 
     // XOR-shift PRNG seeded from UID for randomizing chip_id / slot number.
     uint32_t prng = (uint32_t)uid[0] ^ ((uint32_t)uid[1] << 8) ^
@@ -2527,12 +2526,14 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
     int tagState = 0;
     uint16_t len = 0;
     uint16_t cmdsReceived = 0;
+    bool in_tx = false;
 
     // Start in RX mode; init the software UART for the first receive.
     LED_D_OFF();
     FpgaWriteConfWord(FPGA_MAJOR_MODE_HF_SIMULATOR | FPGA_HF_SIMULATOR_NO_MODULATION);
     Uart14bInit(receivedCmd);
-
+    uint32_t field_check_ms_default = 10;
+    uint32_t field_check_ms = field_check_ms_default;
     // Hardware-timer-based field-loss detection.
     // SumAdc(32) takes ~640 us, so we only call it every field_check_ms milliseconds.
     uint32_t field_check_tick = GetTickCount();
@@ -2540,36 +2541,59 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
     // Tag-simulation SSP_CLK = 13.56MHz/32 = 423.75kHz → 1 byte = 8 clocks = 256 FC.
     uint32_t ssp_count = 0;
     uint32_t frame_start_ssp = 0;  // ssp_count at start of current reader frame
+    uint32_t field_loss_early_consec = 0;  // field lost while in READY/INVENTORY (not yet selected)
+    uint32_t ready_after_inv_consec = 0;   // state dropped back to READY from SELECTED/DESELECTED
+
+    //g_srt512_byte_head = 0;
+    //memset(g_srt512_byte_fifo, 0, sizeof(g_srt512_byte_fifo));
 
     while (BUTTON_PRESS() == false) {
         WDT_HIT();
-
         if (data_available()) break;
 
         // Non-blocking SSC byte read.
         if (!(AT91C_BASE_SSC->SSC_SR & AT91C_SSC_RXRDY)) {
-            // Only run field-loss check while we have a field (tagState != 0).
-            // Timer is suspended (UINT32_MAX) after a loss until INITIATE resets it.
-            if (tagState == 0) continue;
+            if (no_field_loss) continue;
             if (GetTickCountDelta(field_check_tick) < field_check_ms) continue;
             field_check_tick = GetTickCount();
+            field_check_ms = field_check_ms_default; //Set the timer back to default. 
 
-            // Use 2 samples instead of 32: each ADC conversion at 375kHz takes
-            // ~64us, so 32 samples = ~2ms which can swallow an entire INITIATE
-            // frame (~700us).  2 samples = ~128us, well under one frame.
-            // Scaling: max sum for N=2 is 2*1023=2046~2^11, so shift by 11.
-            int vHf = (MAX_ADC_HF_VOLTAGE * SumAdc(ADC_CHAN_HF, 2)) >> 11;
+            int vHf = (MAX_ADC_HF_VOLTAGE * SumAdc(ADC_CHAN_HF, 32)) >> 15;
             if (vHf < MF_MINFIELDV) {
-                if (g_dbglevel >= DBG_DEBUG)
-                    Dbprintf("SRT512: field lost (vHf=%d)", vHf);
-                tagState = 0;
-                LED_A_OFF();
-                Uart14bInit(receivedCmd);  // reset UART for when field returns
-                // Suspend timer until INITIATE arrives.
-                field_check_tick = UINT32_MAX;
+                // Only handle the transition once — ignore repeated checks while already in state 0.
+                if (tagState != 0) {
+                    int prev_state = tagState;
+                    tagState = 0;
+                    in_tx = false;
+                    LED_A_OFF();
+                    // Reset UART immediately so no garbage accumulates while field is absent.
+                    Uart14bInit(receivedCmd);
+                    if (prev_state == 1 || prev_state == 2) {
+                        field_loss_early_consec++;
+                        if (g_dbglevel >= DBG_ERROR)
+                            Dbprintf("SRT512: field lost early (state=%d) #%u", prev_state, field_loss_early_consec);
+                    } else {
+                        ready_after_inv_consec++;
+                        if (g_dbglevel >= DBG_ERROR)
+                            Dbprintf("SRT512: field lost after select (state=%d) #%u", prev_state, ready_after_inv_consec);
+                    }
+                }
+            } else {
+                if (tagState == 0) {
+                    tagState = 1;  // field returned, back to READY
+                    field_check_ms = 50; //Increase the timer to let the field settle
+                    in_tx = true; //this causes srt512_next_frame to clean up the uart and switch to RX mode and reset the timer. 
+                    goto srt512_next_frame;
+
+                    LED_A_ON();
+                    if (g_dbglevel >= DBG_ERROR && (field_loss_early_consec > 0 || ready_after_inv_consec > 0))
+                        Dbprintf("SRT512: field returned, back to READY. Early losses: %u, post-select losses: %u",
+                                 field_loss_early_consec, ready_after_inv_consec);
+                }
             }
             continue;
         }
+
 
         // Got a byte — feed it into the software UART bit-by-bit.
         // NOTE: do NOT reset no_rxrdy_ctr here. The FPGA SSC runs off an internal
@@ -2578,10 +2602,16 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
         // 500 000, making the vHf field-loss check unreachable.
         uint8_t rx_byte = (uint8_t)AT91C_BASE_SSC->SSC_RHR;
         ssp_count++;
+
+        // Capture raw SSC bytes so phase-slip dumps can inspect pre-SOF history.
+        //g_srt512_byte_fifo[g_srt512_byte_head] = rx_byte;
+        //g_srt512_byte_head = (g_srt512_byte_head + 1) & (SRT512_SOF_FIFO_BYTES - 1);
+
         bool frame_done = false;
         if (Uart.state == STATE_14B_UNSYNCD) {
             frame_start_ssp = ssp_count;
         }
+
         for (uint8_t mask = 0x80; mask != 0x00; mask >>= 1) {
             if (Handle14443bSampleFromReader(rx_byte & mask)) {
                 len = Uart.byteCnt;
@@ -2591,6 +2621,7 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
         }
         if (!frame_done) continue;
 
+
         // Complete frame received — log it with SSC-derived timestamps.
         // 1 SSP byte = 256 FC at tag-simulation rate (13.56MHz/32 clock).
         uint32_t rx_start_fc = frame_start_ssp * 256U;
@@ -2599,48 +2630,86 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
         frame_start_ssp = ssp_count;  // reset for next frame
 
         if (len < 3) {
-            if (g_dbglevel >= DBG_DEBUG)
-                Dbprintf("SRT512: short frame len=%d, ignored", len);
+            // SOF phase-slip recovery: if we got exactly 2 bytes that are the
+            // CRC of INITIATE (06 00), reconstruct the full frame and continue.
+            if (len == 2) {
+                uint8_t candidate[4] = { ISO14443B_INITIATE, 0x00, receivedCmd[0], receivedCmd[1] };
+                if (check_crc(CRC_14443_B, candidate, 4)) {
+                    memcpy(receivedCmd, candidate, 4);
+                    len = 4;
+                    Dbprintf("SRT512: SOF phase-slip! CRC bytes %02X %02X - byte FIFO dump (oldest first):",
+                             candidate[2], candidate[3]);
+                    //static const char _hex[] = "0123456789ABCDEF";
+                    //char _fl[49];
+                    //for (int _l = 0; _l < 16; _l++) {
+                    //    uint8_t _p = 0;
+                    //    for (int _b = 0; _b < 16; _b++) {
+                    //        uint16_t _i = (g_srt512_byte_head + (uint16_t)(_l * 16 + _b)) & (SRT512_SOF_FIFO_BYTES - 1);
+                    //        uint8_t _v = g_srt512_byte_fifo[_i];
+                    //        _fl[_p++] = _hex[_v >> 4];
+                    //        _fl[_p++] = _hex[_v & 0x0F];
+                    //        if (_b != 15) _fl[_p++] = ' ';
+                    //    }
+                    //    _fl[_p] = '\0';
+                    //    Dbprintf("  [%3d] %s", _l * 16, _fl);
+                    //}
+                    goto srt512_dispatch;
+                }
+            }
             goto srt512_next_frame;
         }
 
         if (check_crc(CRC_14443_B, receivedCmd, len) == false) {
-            if (g_dbglevel >= DBG_DEBUG)
-                Dbprintf("SRT512: CRC fail cmd=%02X len=%d errs sof_s=%d sof_l=%d gap=%d bad=%d ovf=%d",
-                         receivedCmd[0], len,
-                         Uart.errSOFShort, Uart.errSOFLong,
-                         Uart.errGapLong, Uart.errBadByte, Uart.errOverflow);
+            if (g_dbglevel >= DBG_ERROR)
+                Dbprintf("SRT512: CRC FAIL len=%d cmd=%02X...", len, receivedCmd[0]);
             goto srt512_next_frame;
         }
 
+srt512_dispatch:
+        ;  // empty statement needed after label before a declaration
         uint8_t cmd_byte = receivedCmd[0];
 
-        if (tagState == 0 || tagState == 1 ) {
-            // ---- READY state (tagState 1) or no-field state (tagState 0) ----
+        // When field-loss detection is disabled, INITIATE from SELECTED or DESELECTED resets the state machine.
+        if (no_field_loss && cmd_byte == ISO14443B_INITIATE && receivedCmd[1] == 0x00 && len == 4
+            && (tagState == 3 || tagState == 4)) {
+            ready_after_inv_consec++;
+            if (g_dbglevel >= DBG_ERROR && ready_after_inv_consec >= 2)
+                Dbprintf("SRT512: [%s] INITIATE -> reset to READY #%u consecutive (no-field-loss)",
+                         tagState == 3 ? "SELECTED" : "DESELECTED", ready_after_inv_consec);
+            tagState = 1; //READY
+        }
+
+        if (skip_ready && tagState == 1) {
+            tagState = 2; //INVENTORY
+        }
+
+        if (tagState == 1) {
+            // ---- READY state (tagState 1) ----
             // Per spec: only INITIATE is accepted; anything else is silently ignored.
             // If we receive INITIATE while tagState == 0 the field must have returned
             // (reader is powering it up), so treat it as field-detected + INITIATE.
             if (cmd_byte == ISO14443B_INITIATE && receivedCmd[1] == 0x00 && len == 4) {
-                if (tagState == 0) {
-                    // Field returned — detected via incoming command, not ADC.
-                    LED_A_ON();
-                    if (g_dbglevel >= DBG_DEBUG)
-                        Dbprintf("SRT512: [OFF] field detected via INITIATE -> READY");
-                }
                 chip_id = srt512_new_chipid(&prng, chip_id, chipid_mode, force_slot0);
                 srt512_encode_chipid(chip_id, resp_init, enc_init, enc_init_len,
                                               resp_select, enc_select, enc_select_len);
                 TransmitFor14443b_AsTag(enc_init, enc_init_len);
+                field_check_ms = 50; //Increase the timer
+                in_tx = true;
                 ssp_count += enc_init_len;
                 LogTrace(resp_init, sizeof(resp_init), rx_end_fc, ssp_count * 256U, NULL, false);
-                // Delay next field check by 50ms to cover the INITIATE→SELECT gap.
-                field_check_tick = GetTickCount() - field_check_ms + 50U;
                 tagState = 2;  // advance to INVENTORY
-                if (g_dbglevel >= DBG_DEBUG)
-                    Dbprintf("SRT512: [READY] INITIATE chip_id=%02X slot=%d -> INVENTORY", chip_id, chip_id & 0x0F);
+                if (g_dbglevel >= DBG_DEBUG) {
+                    if (no_field_loss)
+                        Dbprintf("SRT512: [READY] INITIATE chip_id=%02X slot=%d -> INVENTORY (no-field-loss)",
+                                 chip_id, chip_id & 0x0F);
+                    else
+                        Dbprintf("SRT512: [READY] INITIATE chip_id=%02X slot=%d -> INVENTORY",
+                                 chip_id, chip_id & 0x0F);
+                }
             } else {
-                if (g_dbglevel >= DBG_DEBUG)
-                    Dbprintf("SRT512: [READY] ignored cmd=%02X len=%d", cmd_byte, len);
+                if (g_dbglevel >= DBG_ERROR)
+                    Dbprintf("SRT512: [READY] ignored cmd=%02X %02X %02X %02X len=%d",
+                             receivedCmd[0], receivedCmd[1], receivedCmd[2], receivedCmd[3], len);
             }
 
         } else if (tagState == 2) {
@@ -2653,6 +2722,8 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
                 srt512_encode_chipid(chip_id, resp_init, enc_init, enc_init_len,
                                               resp_select, enc_select, enc_select_len);
                 TransmitFor14443b_AsTag(enc_init, enc_init_len);
+                field_check_ms = 50; //Increase the timer
+                in_tx = true;
                 ssp_count += enc_init_len;
                 LogTrace(resp_init, sizeof(resp_init), rx_end_fc, ssp_count * 256U, NULL, false);
                 if (g_dbglevel >= DBG_DEBUG)
@@ -2668,6 +2739,7 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
                                               resp_select, enc_select, enc_select_len);
                 if ((chip_id & 0x0F) == 0) {
                     TransmitFor14443b_AsTag(enc_init, enc_init_len);
+                    in_tx = true;
                     ssp_count += enc_init_len;
                     LogTrace(resp_init, sizeof(resp_init), rx_end_fc, ssp_count * 256U, NULL, false);
                     if (g_dbglevel >= DBG_DEBUG)
@@ -2682,6 +2754,7 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
                 uint8_t slot_n = cmd_byte >> 4;
                 if ((chip_id & 0x0F) == slot_n) {
                     TransmitFor14443b_AsTag(enc_init, enc_init_len);
+                    in_tx = true;
                     ssp_count += enc_init_len;
                     LogTrace(resp_init, sizeof(resp_init), rx_end_fc, ssp_count * 256U, NULL, false);
                     if (g_dbglevel >= DBG_DEBUG)
@@ -2694,11 +2767,11 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
             } else if (cmd_byte == ISO14443B_SELECT && len == 4) {
                 if (receivedCmd[1] == chip_id) {
                     TransmitFor14443b_AsTag(enc_select, enc_select_len);
+                    field_check_ms = 50; //Increase the timer
+                    in_tx = true;
                     ssp_count += enc_select_len;
                     LogTrace(resp_select, sizeof(resp_select), rx_end_fc, ssp_count * 256U, NULL, false);
                     tagState = 3;  // SELECTED
-                    // Delay next field check by 50ms to cover the SELECT→GET_UID gap.
-                    field_check_tick = GetTickCount() - field_check_ms + 50U;
                     if (g_dbglevel >= DBG_DEBUG)
                         Dbprintf("SRT512: [INVENTORY] SELECT chip_id=%02X ok -> SELECTED", chip_id);
                 } else {
@@ -2708,8 +2781,9 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
                 }
 
             } else {
-                if (g_dbglevel >= DBG_DEBUG)
-                    Dbprintf("SRT512: [INVENTORY] ignored cmd=%02X len=%d", cmd_byte, len);
+                if (g_dbglevel >= DBG_ERROR)
+                     Dbprintf("SRT512: [INVENTORY] ignored cmd=%02X %02X %02X %02X len=%d",
+                             receivedCmd[0], receivedCmd[1], receivedCmd[2], receivedCmd[3], len);
             }
         } else if (tagState == 3) {
             // ---- SELECTED state ----
@@ -2721,8 +2795,13 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
 
             if (cmd_byte == ISO14443B_GET_UID && len == 3) {
                 TransmitFor14443b_AsTag(enc_uid, enc_uid_len);
+                field_check_ms = 50; //Increase the timer
+                in_tx = true;
                 ssp_count += enc_uid_len;
                 LogTrace(resp_uid, sizeof(resp_uid), rx_end_fc, ssp_count * 256U, NULL, false);
+                // Successful GET_UID — reset consecutive error counters.
+                field_loss_early_consec = 0;
+                ready_after_inv_consec = 0;
                 if (g_dbglevel >= DBG_DEBUG)
                     Dbprintf("SRT512: [SELECTED] GET_UID");
 
@@ -2736,6 +2815,7 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
                     CodeIso14443bAsTag(blkbuf, sizeof(blkbuf));
                     memcpy(enc_temp, ts->buf, ts->max);
                     TransmitFor14443b_AsTag(enc_temp, ts->max);
+                    in_tx = true;
                     ssp_count += ts->max;
                     LogTrace(blkbuf, sizeof(blkbuf), rx_end_fc, ssp_count * 256U, NULL, false);
                     if (g_dbglevel >= DBG_DEBUG)
@@ -2760,6 +2840,7 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
                 // SELECT with wrong chip_id → DESELECTED (back to INVENTORY)
                 if (receivedCmd[1] == chip_id) {
                     TransmitFor14443b_AsTag(enc_select, enc_select_len);
+                    in_tx = true;
                     ssp_count += enc_select_len;
                     LogTrace(resp_select, sizeof(resp_select), rx_end_fc, ssp_count * 256U, NULL, false);
                     if (g_dbglevel >= DBG_DEBUG)
@@ -2769,6 +2850,7 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
                     if (g_dbglevel >= DBG_DEBUG)
                         Dbprintf("SRT512: [SELECTED] SELECT wrong chip_id=%02X -> DESELECTED", receivedCmd[1]);
                 }
+                
 
             } else if (cmd_byte == ISO14443B_RESET && len == 3) {
                 // RESET_TO_INVENTORY: → INVENTORY, no response
@@ -2783,9 +2865,11 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
                     Dbprintf("SRT512: [SELECTED] COMPLETION -> READY");
 
             } else {
+                in_tx = true;
                 // INITIATE, PCALL16, SLOT_MARKER — all silently ignored when SELECTED.
-                if (g_dbglevel >= DBG_DEBUG)
-                    Dbprintf("SRT512: [SELECTED] ignored cmd=%02X len=%d", cmd_byte, len);
+                if (g_dbglevel >= DBG_ERROR)
+                    Dbprintf("SRT512: [SELECTED] ignored cmd=%02X %02X %02X %02X len=%d",
+                             receivedCmd[0], receivedCmd[1], receivedCmd[2], receivedCmd[3], len);
             }
         } else if (tagState == 4) {
             // ---- DESELECTED state (tagState == 4) ----
@@ -2796,6 +2880,8 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
                 // SELECT with wrong chip_id → DESELECTED (Do Nothing)
                 if (receivedCmd[1] == chip_id) {
                     TransmitFor14443b_AsTag(enc_select, enc_select_len);
+                    field_check_ms = 50; //Increase the timer
+                    in_tx = true;
                     ssp_count += enc_select_len;
                     LogTrace(resp_select, sizeof(resp_select), rx_end_fc, ssp_count * 256U, NULL, false);
                     tagState = 3;  // SELECTED
@@ -2808,42 +2894,55 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
             
             } else {
                 // All commands ignored while deselected except SELECT with correct chip_id, which moves us back to SELECTED.
-                if (g_dbglevel >= DBG_DEBUG)
-                    Dbprintf("SRT512: [DESELECTED] ignored cmd=%02X len=%d", cmd_byte, len);
+                if (g_dbglevel >= DBG_ERROR)
+                    Dbprintf("SRT512: [DESELECTED] ignored cmd=%02X %02X %02X %02X len=%d",
+                             receivedCmd[0], receivedCmd[1], receivedCmd[2], receivedCmd[3], len);
             }
         } else {
             // This should not happen, but if it does, reset to READY state.
             tagState = 1;  // READY
-            if (g_dbglevel >= DBG_DEBUG)
-                Dbprintf("SRT512: [UNKNOWN STATE] ignored cmd=%02X len=%d -> READY", cmd_byte, len);
+            if (g_dbglevel >= DBG_ERROR)
+                Dbprintf("SRT512: [UNKNOWN STATE] ignored cmd=%02X %02X %02X %02X len=%d",
+                             receivedCmd[0], receivedCmd[1], receivedCmd[2], receivedCmd[3], len);
         }
 
         ++cmdsReceived;
 
 srt512_next_frame:
-        // Wait for the SSC shift register to fully clock out the last byte
-        // before switching FPGA back to RX mode.  TXRDY fires when the holding
-        // register is free but the last byte is still shifting at 106 kbps
-        // (~75 us/byte).  Switching to NO_MODULATION before TXEMPTY truncates
-        // the end of every response.  Debug Dbprintf() calls were accidentally
-        // providing this delay, masking the bug when debugs were enabled.
-        while (!(AT91C_BASE_SSC->SSC_SR & AT91C_SSC_TXEMPTY)) {};
+
         LED_D_OFF();
         FpgaWriteConfWord(FPGA_MAJOR_MODE_HF_SIMULATOR | FPGA_HF_SIMULATOR_NO_MODULATION);
-        // Delay next field check by 50ms after every TX so we don't sample vHf
-        // in the brief quiet window while the reader is processing our response.
-        // The reader's inter-frame gap is ~47ms, so 50ms clears it safely.
-        field_check_tick = GetTickCount() - field_check_ms + 50U;
+        
+
+        // Flush any SSC bytes that arrived during the TX→RX mode switch.
+        // The FPGA can produce a few transitional bytes when switching from
+        // SEND_MODULATION to NO_MODULATION; discarding them prevents false
+        // SOF detections in Handle14443bSampleFromReader().  We do NOT add
+        // a delay here because the reader sends GET_UID within ~57µs (TR2)
+        // of receiving our SELECT response — any sleep would cause us to miss it.
+        // Update ssp_count so that LogTrace timestamps remain accurate.
+        if (in_tx) {
+            while (AT91C_BASE_SSC->SSC_SR & AT91C_SSC_RXRDY) {
+                (void)AT91C_BASE_SSC->SSC_RHR;  // discard transitional garbage
+                ssp_count++;
+            }
+
+
+            // Delay next field check after every TX so we don't sample vHf
+            // in the brief quiet window while the reader is processing our response.
+            if (!no_field_loss)
+                field_check_tick = GetTickCount();
+
+
+        }
         Uart14bInit(receivedCmd);
         len = 0;
+        in_tx = false;
     }
 
-    if (g_dbglevel >= DBG_DEBUG)
-        Dbprintf("SRT512 emulator stopped. cmds=%d trace=%d errs sof_s=%d sof_l=%d gap=%d(bc=%d) bad=%d ovf=%d",
-             cmdsReceived, BigBuf_get_traceLen(),
-             Uart.errSOFShort, Uart.errSOFLong,
-             Uart.errGapLong, Uart.errGapByteCntLast,
-             Uart.errBadByte, Uart.errOverflow);
+    if (g_dbglevel >= DBG_ERROR)
+        Dbprintf("SRT512 stopped. cmds=%d fl_early=%u rdy_inv=%u",
+             cmdsReceived, field_loss_early_consec, ready_after_inv_consec);
 
     switch_off();
 }
