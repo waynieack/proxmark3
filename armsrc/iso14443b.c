@@ -591,6 +591,10 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
                 // which would pass a >= 31 check and cause a false SOF.
                 // A real 10-ETU SOF produces 40 zeros → bitCnt=39. Threshold of 37
                 // sits cleanly between them with a 2-sample margin on each side.
+                //
+                // For now we continue to use a threshold of 31 to be more tolerant of 
+                // timing variations, but this does mean we might occasionally detect a false SOF
+                // which we can recover from.
                 if (Uart.bitCnt >= 31) {
                     Uart.posCnt = 0;
                     Uart.byteCnt = 0;
@@ -609,13 +613,7 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
 
                 // max 57us between characters = 49 1/fs,
                 // max 3 etus after low phase of SOF = 24 1/fs
-                //if (Uart.posCnt > 50 / 2) {
-                // While waiting for byte-1 after SOF (byteCnt==0), keep timeout
-                // tighter to escape false SOFs quickly.
-                // Once inside frame data (byteCnt>0), keep a looser timeout to
-                // tolerate real reader inter-byte jitter.
-                int gap_limit = (Uart.byteCnt == 0) ? 25 : 50;
-                if (Uart.posCnt > gap_limit) {
+                if (Uart.posCnt > 50 / 2) {
 
                     // stayed high for too long between characters, error
                     Uart.state = STATE_14B_UNSYNCD;
@@ -2523,7 +2521,9 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
     //   2 = INVENTORY  — responded to INITIATE; PCALL16/SLOT_MARKER/SELECT valid
     //   3 = SELECTED   — responded to SELECT with matching chip_id
     //   4 = DESELECTED — wrong chip_id SELECT received; only SELECT valid
-    int tagState = 0;
+    // When no_field_loss is enabled there is no field-drop between cycles, so
+    // we start already in READY state (field is assumed present from the start).
+    int tagState = no_field_loss ? 1 : 0;
     uint16_t len = 0;
     uint16_t cmdsReceived = 0;
     bool in_tx = false;
