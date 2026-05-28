@@ -1,5 +1,14 @@
 [
     {
+        "AID": "0000000000000001",
+        "Vendor": "",
+        "Country": "",
+        "Name": "Livin' card",
+        "Description": "",
+        "Type": "",
+        "Protocol": "mifare_plus"
+    },
+    {
         "AID": "315041592E5359532E4444463031",
         "Vendor": "EMV",
         "Country": "United States",
@@ -22,6 +31,14 @@
         "Name": "DeviceFidelity In2Pay DFare applet",
         "Description": "http://www.nfcworld.com/2010/11/24/35207/devicefidelity-adds-nfc-support-for-android-and-mifare/",
         "Type": ""
+    },
+    {
+        "AID": "5041592E535A54",
+        "Vendor": "Shenzhen Tong",
+        "Country": "China",
+        "Name": "Shenzhen Tong",
+        "Description": "Shenzhen Tong transit card (ASCII PAY.SZT)",
+        "Type": "transport"
     },
     {
         "AID": "A00000000101",
@@ -174,6 +191,14 @@
         "Name": "VISA Plus",
         "Description": "VISA plus",
         "Type": "EMV"
+    },
+    {
+        "AID": "A00000000386980701",
+        "Vendor": "China City Union",
+        "Country": "China",
+        "Name": "China City Union",
+        "Description": "China City Union transit card",
+        "Type": "transport"
     },
     {
         "AID": "A0000000039010",
@@ -1496,6 +1521,15 @@
         "Type": ""
     },
     {
+        "AID": "A0000004520001",
+        "Vendor": "T MONEY",
+        "Country": "Republic of Korea",
+        "Name": "T MONEY (KS X 6924)",
+        "Description": "KS X 6924-based T MONEY transit card",
+        "Type": "transport",
+        "Protocol": "ks_x_6924"
+    },
+    {
         "AID": "A0000004540010",
         "Vendor": "eTranzact",
         "Country": "Nigeria",
@@ -2122,12 +2156,30 @@
         "Type": "SmartChess"
     },
     {
+        "AID": "D2760001834467323031324C50303431",
+        "Vendor": "Hamburger Verkehrsverbund (HVV)",
+        "Country": "Germany",
+        "Name": "HVV (Hamburg) card",
+        "Description": "Hamburg public transport card",
+        "Type": "transport",
+        "Protocol": "mifare_desfire"
+    },
+    {
         "AID": "D4100000011010",
         "Vendor": "",
         "Country": "Republic of Korea",
         "Name": "",
         "Description": "",
         "Type": ""
+    },
+    {
+        "AID": "D4100000030001",
+        "Vendor": "T MONEY",
+        "Country": "Republic of Korea",
+        "Name": "T MONEY (KS X 6924)",
+        "Description": "KS X 6924-based T MONEY transit card",
+        "Type": "transport",
+        "Protocol": "ks_x_6924"
     },
     {
         "AID": "D41000003453504159",
@@ -2395,6 +2447,14 @@
         "Protocol": "ccc_digital_car_key"
     },
     {
+        "AID": "A0000008118001",
+        "Vendor": "",
+        "Country": "",
+        "Name": "Otto card",
+        "Description": "EMV-like card; protocol unknown",
+        "Type": ""
+    },
+    {
         "AID": "A0000008400000000000000000001234",
         "Vendor": "Allegion",
         "Country": "",
@@ -2488,6 +2548,33 @@
         "Type": ""
     },
     {
+        "AID": "A000000396564341034D464300000000",
+        "Vendor": "Touch 'N GO",
+        "Country": "Malaysia",
+        "Name": "Touch 'N GO card (DESFIRE EV3C)",
+        "Description": "MIFARE DESFire EV3C-based Touch 'N GO card",
+        "Type": "transport",
+        "Protocol": "mifare_desfire"
+    },
+    {
+        "AID": "A000000396564341FFFFFFFFFFFFFFFF",
+        "Vendor": "NXP",
+        "Country": "",
+        "Name": "MIFARE Plus default AID",
+        "Description": "Default AID for MIFARE Plus; used by Riocard Mais and Touch 'N GO cards",
+        "Type": "",
+        "Protocol": "mifare_plus"
+    },
+    {
+        "AID": "A00000039656434103F015400000000B",
+        "Vendor": "NXP",
+        "Country": "",
+        "Name": "MIFARE DESFire Light",
+        "Description": "",
+        "Type": "",
+        "Protocol": "mifare_desfire"
+    },
+    {
         "AID": "A00000039656434103F1216000000000",
         "Vendor": "LV Monorail",
         "Country": "United States",
@@ -2503,6 +2590,10 @@
         "Description": "DESFire-based transit card",
         "Type": "transport",
         "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "F213F0",
+            "ISOFID": "EA00"
+        },
         "Sources": [
             "android://com.google.android.gms"
         ]
@@ -2515,6 +2606,10 @@
         "Description": "DESFire-based transit card",
         "Type": "transport",
         "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "F21420",
+            "ISOFID": "F214"
+        },
         "Sources": [
             "android://com.google.android.gms"
         ]
@@ -2526,7 +2621,14 @@
         "Name": "MARTA Breeze transit card",
         "Description": "DESFire-based transit card",
         "Type": "transport",
-        "Protocol": "mifare_desfire"
+        "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "F21450",
+            "ISOFID": "EA00"
+        },
+        "Sources": [
+            "android://com.google.android.gms"
+        ]
     },
     {
         "AID": "A00000039656434103F8852200000000",
@@ -2536,6 +2638,10 @@
         "Description": "DESFire-based virtual transit card",
         "Type": "transport",
         "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "F88522",
+            "ISOFID": "8522"
+        },
         "Sources": [
             "android://com.google.android.gms"
         ]
@@ -2548,6 +2654,42 @@
         "Description": "DESFire-based transit card",
         "Type": "transport",
         "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "010000",
+            "ISOFID": "000E"
+        },
+        "Sources": [
+            "android://com.google.android.gms"
+        ]
+    },
+    {
+        "AID": "A00000039656434103F210C000000000",
+        "Vendor": "Ubian",
+        "Country": "Slovakia",
+        "Name": "Ubian digital transit card (Secondary)",
+        "Description": "DESFire-based virtual transit card secondary application",
+        "Type": "transport",
+        "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "F210C0",
+            "ISOFID": "10C0"
+        },
+        "Sources": [
+            "android://com.google.android.gms"
+        ]
+    },
+    {
+        "AID": "A00000F210F0",
+        "Vendor": "PTV",
+        "Country": "Australia",
+        "Name": "Myki transit card (Secondary)",
+        "Description": "DESFire-based transit card secondary application",
+        "Type": "transport",
+        "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "F210F0",
+            "ISOFID": "02E0"
+        },
         "Sources": [
             "android://com.google.android.gms"
         ]
@@ -2560,6 +2702,10 @@
         "Description": "DESFire-based transit card",
         "Type": "transport",
         "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "F21100",
+            "ISOFID": "01E0"
+        },
         "Sources": [
             "android://com.google.android.gms"
         ]
@@ -2571,28 +2717,40 @@
         "Name": "LA Tap",
         "Description": "DESFire-based transit card (ASCII cp\\x01\\xffLA)",
         "Type": "transport",
-        "Protocol": "mifare_desfire"
+        "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "000001",
+            "ISOFID": "0001"
+        }
     },
     {
-        "AID": "637001ff574d415441",
+        "AID": "637001FF574D415441",
         "Vendor": "Cubic",
         "Country": "United States",
         "Name": "Smart Trip",
         "Description": "DESFire-based transit card (ASCII cp\\x01\\xffWMATA)",
         "Type": "transport",
         "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "000001",
+            "ISOFID": "0001"
+        },
         "Sources": [
             "android://com.google.android.gms"
         ]
     },
     {
-        "AID": "637001ff434c4950504552",
+        "AID": "637001FF434C4950504552",
         "Vendor": "Cubic",
         "Country": "United States",
         "Name": "Clipper",
         "Description": "DESFire-based transit card (ASCII cp\\x01\\xffCLIPPER)",
         "Type": "transport",
         "Protocol": "mifare_desfire",
+        "Extras": {
+            "AID": "F21191",
+            "ISOFID": "2119"
+        },
         "Sources": [
             "android://com.google.android.gms"
         ]
@@ -2966,6 +3124,18 @@
         ]
     },
     {
+        "AID": "315449432E49434132",
+        "Vendor": "Calypso Networks Association (CNA)",
+        "Country": "France",
+        "Name": "1TIC.ICA2",
+        "Description": "Compatibility AID. \"1TIC.ICA2\" in ISO/IEC 8859-1 coding.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "2100"
+        }
+    },
+    {
         "AID": "304554502E494341",
         "Vendor": "Calypso Networks Association (CNA)",
         "Country": "France",
@@ -2990,20 +3160,83 @@
         "Name": "3MTR.ICA",
         "Description": "Legacy header dedicated to the Master File. \"3MTR.ICA\" in ISO/IEC 8859-1 coding.",
         "Type": "",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "3F00"
+        }
+    },
+    {
+        "AID": "334D54522E494341D48401019001",
+        "Vendor": "Secretaria de Movilidad (SEMOVI)",
+        "Country": "Mexico",
+        "Name": "Tarjeta de Movilidad Integrada",
+        "Description": "Master File AID observed on a Mexico City Tarjeta de Movilidad Integrada. \"3MTR.ICA\" in ISO/IEC 8859-1 coding.",
+        "Type": "",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "3F00"
+        }
+    },
+    {
+        "AID": "334D54522E4943410000000000000000",
+        "Vendor": "Lignes D'Azur",
+        "Country": "France",
+        "Name": "La Carte",
+        "Description": "Master File AID observed on La Carte. \"3MTR.ICA\" in ISO/IEC 8859-1 coding with a zero-padded suffix.",
+        "Type": "",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "3F00"
+        }
+    },
+    {
+        "AID": "315449432E494341D4840101",
+        "Vendor": "Secretaria de Movilidad (SEMOVI)",
+        "Country": "Mexico",
+        "Name": "Tarjeta de Movilidad Integrada",
+        "Description": "AID prefix observed for Calypso applications on Mexico City Tarjeta de Movilidad Integrada.",
+        "Type": "transport",
         "Protocol": "cna_calypso"
     },
     {
         "AID": "315449432E494341D48401019101",
-        "Vendor": "Spirtech",
+        "Vendor": "Secretaria de Movilidad (SEMOVI); Spirtech",
         "Country": "N/A",
-        "Name": "Mover Emilia Romagna | CDMX Tarjeta de Movilidad",
-        "Description": "Calypso-based ticket for public transport in Emilia-Romagna or Mexico City.",
+        "Name": "Tarjeta de Movilidad Integrada | Mover Emilia Romagna",
+        "Description": "Calypso-based ticket for public transport in Mexico City or Emilia-Romagna.",
         "Type": "transport",
         "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "2000"
+        },
         "Sources": [
             "android://com.spirtech.emiliaromagna",
             "android://mx.gob.cdmx.adip.apps"
         ]
+    },
+    {
+        "AID": "315449432E494341D48401019301",
+        "Vendor": "Secretaria de Movilidad (SEMOVI)",
+        "Country": "Mexico",
+        "Name": "Tarjeta de Movilidad Integrada",
+        "Description": "Calypso-based public transport application.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "3100"
+        }
+    },
+    {
+        "AID": "315449432E494341D05600019101",
+        "Vendor": "MOBIB",
+        "Country": "Belgium",
+        "Name": "MOBIB",
+        "Description": "Calypso-based transit card used by Brussels public transport.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "2000"
+        }
     },
     {
         "AID": "A000000291D62000029101",
@@ -3030,6 +3263,18 @@
         ]
     },
     {
+        "AID": "304554502E494341D48401019201",
+        "Vendor": "Secretaria de Movilidad (SEMOVI)",
+        "Country": "Mexico",
+        "Name": "Tarjeta de Movilidad Integrada",
+        "Description": "Store value application observed on a Mexico City Tarjeta de Movilidad Integrada.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "1000"
+        }
+    },
+    {
         "AID": "A00000040401250901",
         "Vendor": "Ile-de-France Mobilites",
         "Country": "France",
@@ -3041,6 +3286,30 @@
             "android://com.applidium.vianavigo",
             "android://com.worldline.wallet"
         ]
+    },
+    {
+        "AID": "A0000004040125090101",
+        "Vendor": "Ile-de-France Mobilites",
+        "Country": "France",
+        "Name": "Navigo",
+        "Description": "CALYPSO-based Navigo paper ticket application.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "2000"
+        }
+    },
+    {
+        "AID": "A0000004040125090101000000000000",
+        "Vendor": "Ile-de-France Mobilites",
+        "Country": "France",
+        "Name": "Navigo",
+        "Description": "CALYPSO-based older Navigo plastic card application.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "2000"
+        }
     },
     {
         "AID": "A00000040401250057F0",
@@ -3066,12 +3335,69 @@
     },
     {
         "AID": "A00000040401250920",
+        "Vendor": "Lignes D'Azur / ZOU",
+        "Country": "France",
+        "Name": "La Carte / ZOU",
+        "Description": "CALYPSO-based transit card application observed on La Carte and ZOU cards.",
+        "Type": "transport",
+        "Protocol": "cna_calypso"
+    },
+    {
+        "AID": "A0000004040125092001",
+        "Vendor": "Lignes D'Azur / ZOU",
+        "Country": "France",
+        "Name": "La Carte / ZOU",
+        "Description": "CALYPSO-based transit card application observed on La Carte and ZOU cards.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "2000"
+        }
+    },
+    {
+        "AID": "A0000004040125092001000000000000",
         "Vendor": "Lignes D'Azur",
         "Country": "France",
         "Name": "La Carte",
-        "Description": "CALYPSO-based transit card",
+        "Description": "CALYPSO-based La Carte transit card application.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "2000"
+        }
+    },
+    {
+        "AID": "A000000291D25008009301",
+        "Vendor": "Lignes D'Azur / ZOU",
+        "Country": "France",
+        "Name": "La Carte / ZOU",
+        "Description": "CALYPSO-based transit card application observed on La Carte and ZOU cards.",
         "Type": "transport",
         "Protocol": "cna_calypso"
+    },
+    {
+        "AID": "A0000004040225092001",
+        "Vendor": "ZOU",
+        "Country": "France",
+        "Name": "ZOU",
+        "Description": "CALYPSO-based transit card application observed on ZOU cards.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "1000"
+        }
+    },
+    {
+        "AID": "A0000004044125092001",
+        "Vendor": "ZOU",
+        "Country": "France",
+        "Name": "ZOU",
+        "Description": "CALYPSO-based transit card application observed on ZOU cards.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "2300"
+        }
     },
     {
         "AID": "54494C414D4F32000000",
@@ -3087,13 +3413,109 @@
         ]
     },
     {
+        "AID": "A000000291D05600",
+        "Vendor": "MOBIB",
+        "Country": "Belgium",
+        "Name": "MOBIB",
+        "Description": "AID prefix observed across MOBIB Calypso applications.",
+        "Type": "transport",
+        "Protocol": "cna_calypso"
+    },
+    {
         "AID": "A000000291D05600019001",
         "Vendor": "MOBIB",
         "Country": "Belgium",
         "Name": "MOBIB",
         "Description": "Calypso-based transit card used by Brussels public transport.",
         "Type": "transport",
-        "Protocol": "cna_calypso"
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "3F00"
+        }
+    },
+    {
+        "AID": "A000000291D05600019201",
+        "Vendor": "MOBIB",
+        "Country": "Belgium",
+        "Name": "MOBIB",
+        "Description": "Calypso-based transit card used by Brussels public transport.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "1000"
+        }
+    },
+    {
+        "AID": "A000000291A00000019102",
+        "Vendor": "MOBIB / ZOU",
+        "Country": "Belgium / France",
+        "Name": "MOBIB / ZOU",
+        "Description": "Calypso-based transit card application observed on MOBIB and ZOU cards.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "2100"
+        }
+    },
+    {
+        "AID": "A000000291D05600019301",
+        "Vendor": "MOBIB",
+        "Country": "Belgium",
+        "Name": "MOBIB",
+        "Description": "Calypso-based transit card used by Brussels public transport.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "3100"
+        }
+    },
+    {
+        "AID": "A000000291D05600019302",
+        "Vendor": "MOBIB",
+        "Country": "Belgium",
+        "Name": "MOBIB",
+        "Description": "Calypso-based transit card used by Brussels public transport.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "3200"
+        }
+    },
+    {
+        "AID": "A000000291D05600029302",
+        "Vendor": "MOBIB",
+        "Country": "Belgium",
+        "Name": "MOBIB",
+        "Description": "Calypso-based transit card used by Brussels public transport.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "3300"
+        }
+    },
+    {
+        "AID": "A000000291D05600019303",
+        "Vendor": "MOBIB",
+        "Country": "Belgium",
+        "Name": "MOBIB",
+        "Description": "Calypso-based transit card used by Brussels public transport.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "3400"
+        }
+    },
+    {
+        "AID": "A000000291D05600029401",
+        "Vendor": "MOBIB",
+        "Country": "Belgium",
+        "Name": "MOBIB",
+        "Description": "Calypso-based transit card used by Brussels public transport.",
+        "Type": "transport",
+        "Protocol": "cna_calypso",
+        "Extras": {
+            "LID": "4100"
+        }
     },
     {
         "AID": "A000000291D62000019101",

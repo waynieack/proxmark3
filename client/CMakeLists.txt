@@ -397,6 +397,7 @@ set (TARGET_SOURCES
         ${PM3_ROOT}/client/src/cmdhfepa.c
         ${PM3_ROOT}/client/src/cmdhffelica.c
         ${PM3_ROOT}/client/src/cmdhffido.c
+        ${PM3_ROOT}/client/src/cmdhffmcos.c
         ${PM3_ROOT}/client/src/cmdhffudan.c
         ${PM3_ROOT}/client/src/cmdhfgallagher.c
         ${PM3_ROOT}/client/src/cmdhfgst.c
@@ -411,6 +412,7 @@ set (TARGET_SOURCES
         ${PM3_ROOT}/client/src/cmdhfmfdes.c
         ${PM3_ROOT}/client/src/cmdhfmfhard.c
         ${PM3_ROOT}/client/src/cmdhfmfp.c
+        ${PM3_ROOT}/client/src/cmdhfmfsen.c
         ${PM3_ROOT}/client/src/cmdhfmfu.c
         ${PM3_ROOT}/client/src/cmdhfntag424.c
         ${PM3_ROOT}/client/src/cmdhfsaflok.c
@@ -900,6 +902,7 @@ target_link_libraries(proxmark3 PRIVATE
         pm3rrg_rdv4_hardnested
         pm3rrg_rdv4_id48
         pm3rrg_rdv4_mqtt
+        pm3rrg_rdv4_vec
         ${ADDITIONAL_LNK})
 
 if (NOT SKIPPTHREAD EQUAL 1)

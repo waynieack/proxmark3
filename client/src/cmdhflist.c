@@ -33,6 +33,7 @@
 #include "cmdhfcalypso.h"
 #include "mifare/mifaredefault.h"  // mifare consts
 #include "cmdhfseos.h"
+#include "iso7816/apduinfo.h"
 
 enum MifareAuthSeq {
     masNone,
@@ -1014,7 +1015,7 @@ static void calypso_sfi_file_ref(char *out, size_t out_len, uint8_t p2, uint8_t 
 }
 
 static void calypso_binary_ref(char *out, size_t out_len, uint8_t ins, uint8_t p1, uint8_t p2) {
-    if (ins == CALYPSO_READ_BINARY) {
+    if (ins == CALYPSO_READ_BINARY || ins == CALYPSO_WRITE_BINARY || ins == CALYPSO_UPDATE_BINARY) {
         if ((p1 & 0x80) == 0x80) {
             snprintf(out, out_len, "sfi=%u, off=%u", p1 & 0x1F, p2);
         } else {
@@ -1034,29 +1035,59 @@ static bool annotateCalypsoApdu(char *exp, size_t size, const uint8_t *apdu, siz
         return false;
     }
 
-    uint8_t ins = apdu[1];
-    uint8_t p1 = apdu[2];
-    uint8_t p2 = apdu[3];
+    uint8_t decoded_data[1024] = {0};
+    APDU_t decoded = {0};
+    bool decoded_ok = false;
+    if (apdu_len <= sizeof(decoded_data)) {
+        memcpy(decoded_data, apdu, apdu_len);
+        decoded_ok = APDUDecode(decoded_data, (int)apdu_len, &decoded) == 0;
+        if (decoded_ok == false && apdu_len > 2) {
+            decoded_ok = APDUDecode(decoded_data, (int)(apdu_len - 2), &decoded) == 0;
+        }
+    }
+
+    uint8_t ins = decoded_ok ? decoded.ins : apdu[1];
+    uint8_t p1 = decoded_ok ? decoded.p1 : apdu[2];
+    uint8_t p2 = decoded_ok ? decoded.p2 : apdu[3];
 
     switch (ins) {
         case CALYPSO_SELECT: {
-            if (p1 == 0x04) {
+            if (decoded_ok && (p1 == 0x00 || p1 == 0x08 || p1 == 0x09)) {
+                char ref[64] = "current DF"; // Select for empty LID implies current DF
+                if (decoded.lc == 2) {
+                    uint16_t fid = (decoded.data[0] << 8) | decoded.data[1];
+                    if (fid == 0x3F00) {
+                        snprintf(ref, sizeof(ref), "MF");
+                    } else if (fid != 0x0000) {
+                        snprintf(ref, sizeof(ref), p1 == 0x08 ? "path=%04X" : "lid=%04X", fid);
+                    }
+                } else if (decoded.lc > 0) {
+                    snprintf(ref, sizeof(ref), p1 == 0x08 ? "path=%s" : "data=%s", sprint_hex_inrow(decoded.data, decoded.lc));
+                }
+                snprintf(exp, size, "SELECT FILE (%s)", ref);
+            } else if (p1 == 0x04) {
                 const char *mode = (p2 == 0x02 || p2 == 0x0E) ? "next" : "first";
-                const char *fci = (p2 == 0x0C || p2 == 0x0E) ? "none" : "return";
-                snprintf(exp, size, "SELECT APPLICATION (mode=%s, fci=%s)", mode, fci);
+                const char *fci = (p2 == 0x0C || p2 == 0x0E) ? "N" : "Y";
+                if (decoded_ok && decoded.lc > 0) {
+                    snprintf(exp, size, "SELECT APP (aid=%s, mode=%s, fci=%s)", sprint_hex_inrow(decoded.data, decoded.lc), mode, fci);
+                } else {
+                    snprintf(exp, size, "SELECT APP (mode=%s, fci=%s)", mode, fci);
+                }
             } else if (p1 == 0x02 && (p2 == 0x00 || p2 == 0x02)) {
-                snprintf(exp, size, "SELECT FILE");
-            } else if (p1 == 0x09 && p2 == 0x00) {
-                snprintf(exp, size, "SELECT FILE (current DF)");
-            } else if (p1 == 0x00) {
-                snprintf(exp, size, "SELECT FILE (by file id)");
-            } else if (p1 == 0x08) {
-                snprintf(exp, size, "SELECT FILE (by path)");
+                snprintf(exp, size, p2 == 0x02 ? "SELECT FILE (next EF)" : "SELECT FILE (first EF)");
+            } else if (p1 == 0x03) {
+                snprintf(exp, size, "SELECT FILE (parent DF)");
             } else {
                 snprintf(exp, size, "SELECT");
             }
             return true;
         }
+        case CALYPSO_INVALIDATE:
+            snprintf(exp, size, "INVALIDATE");
+            return true;
+        case CALYPSO_REHABILITATE:
+            snprintf(exp, size, "REHABILITATE");
+            return true;
         case CALYPSO_GET_DATA: {
             uint16_t tag = (p1 << 8) | p2;
             const char *name = CalypsoGetDataTagName(tag);
@@ -1065,6 +1096,36 @@ static bool annotateCalypsoApdu(char *exp, size_t size, const uint8_t *apdu, siz
             } else {
                 snprintf(exp, size, "GET DATA (tag=%04X)", tag);
             }
+            return true;
+        }
+        case CALYPSO_APPEND_RECORD: {
+            char ref[20];
+            calypso_sfi_file_ref(ref, sizeof(ref), p2, 0x00, 0x00);
+            snprintf(exp, size, "APPEND RECORD (%s)", ref);
+            return true;
+        }
+        case CALYPSO_DECREASE: {
+            char ref[20];
+            calypso_sfi_file_ref(ref, sizeof(ref), p2, 0x00, 0x00);
+            snprintf(exp, size, "DECREASE (%s, counter=%u)", ref, p1);
+            return true;
+        }
+        case CALYPSO_DECREASE_MULTIPLE: {
+            char ref[20];
+            calypso_sfi_file_ref(ref, sizeof(ref), p2, 0x00, 0x00);
+            snprintf(exp, size, "DECREASE MULTIPLE (%s)", ref);
+            return true;
+        }
+        case CALYPSO_INCREASE: {
+            char ref[20];
+            calypso_sfi_file_ref(ref, sizeof(ref), p2, 0x00, 0x00);
+            snprintf(exp, size, "INCREASE (%s, counter=%u)", ref, p1);
+            return true;
+        }
+        case CALYPSO_INCREASE_MULTIPLE: {
+            char ref[20];
+            calypso_sfi_file_ref(ref, sizeof(ref), p2, 0x00, 0x00);
+            snprintf(exp, size, "INCREASE MULTIPLE (%s)", ref);
             return true;
         }
         case CALYPSO_READ_RECORD: {
@@ -1079,6 +1140,12 @@ static bool annotateCalypsoApdu(char *exp, size_t size, const uint8_t *apdu, siz
             snprintf(exp, size, "READ RECORDS (%s, rec=%u)", ref, p1);
             return true;
         }
+        case CALYPSO_SEARCH_RECORD_MULTIPLE: {
+            char ref[20];
+            calypso_sfi_file_ref(ref, sizeof(ref), p2, 0x07, 0x07);
+            snprintf(exp, size, "SEARCH RECORD (%s, rec=%u)", ref, p1);
+            return true;
+        }
         case CALYPSO_READ_BINARY:
         case CALYPSO_READ_BINARY_EXTENDED: {
             char ref[20];
@@ -1086,8 +1153,71 @@ static bool annotateCalypsoApdu(char *exp, size_t size, const uint8_t *apdu, siz
             snprintf(exp, size, "READ BINARY (%s)", ref);
             return true;
         }
+        case CALYPSO_WRITE_BINARY: {
+            char ref[20];
+            calypso_binary_ref(ref, sizeof(ref), ins, p1, p2);
+            snprintf(exp, size, "WRITE BINARY (%s)", ref);
+            return true;
+        }
+        case CALYPSO_UPDATE_BINARY: {
+            char ref[20];
+            calypso_binary_ref(ref, sizeof(ref), ins, p1, p2);
+            snprintf(exp, size, "UPDATE BINARY (%s)", ref);
+            return true;
+        }
+        case CALYPSO_UPDATE_RECORD: {
+            char ref[20];
+            calypso_sfi_file_ref(ref, sizeof(ref), p2, 0x04, 0x04);
+            snprintf(exp, size, "UPDATE RECORD (%s, rec=%u)", ref, p1);
+            return true;
+        }
+        case CALYPSO_WRITE_RECORD: {
+            char ref[20];
+            calypso_sfi_file_ref(ref, sizeof(ref), p2, 0x04, 0x04);
+            snprintf(exp, size, "WRITE RECORD (%s, rec=%u)", ref, p1);
+            return true;
+        }
         case CALYPSO_GET_CHALLENGE:
             snprintf(exp, size, "GET CHALLENGE");
+            return true;
+        case CALYPSO_OPEN_SESSION:
+            snprintf(exp, size, "OPEN SESSION");
+            return true;
+        case CALYPSO_CLOSE_SESSION:
+            snprintf(exp, size, "CLOSE SESSION");
+            return true;
+        case CALYPSO_VERIFY_PIN:
+            snprintf(exp, size, "VERIFY PIN");
+            return true;
+        case CALYPSO_RESET_RETRY_COUNTER:
+            snprintf(exp, size, "RESET RETRY COUNTER");
+            return true;
+        case CALYPSO_CHANGE_PIN:
+            if (p1 == 0x00 && (p2 == 0x04 || p2 == 0xFF)) {
+                snprintf(exp, size, "CHANGE PIN");
+            } else if (p1 == 0x00 && p2 >= 0x01 && p2 <= 0x03) {
+                snprintf(exp, size, "CHANGE KEY");
+            } else {
+                snprintf(exp, size, "CHANGE PIN/KEY");
+            }
+            return true;
+        case CALYPSO_SV_GET:
+            snprintf(exp, size, "SV GET");
+            return true;
+        case CALYPSO_SV_DEBIT:
+            snprintf(exp, size, "SV DEBIT (challenge=%02X%02X)", p1, p2);
+            return true;
+        case CALYPSO_SV_RELOAD:
+            snprintf(exp, size, "SV RELOAD (challenge=%02X%02X)", p1, p2);
+            return true;
+        case CALYPSO_SV_UN_DEBIT:
+            snprintf(exp, size, "SV UNDEBIT (challenge=%02X%02X)", p1, p2);
+            return true;
+        case CALYPSO_SAM_SV_DEBIT:
+            snprintf(exp, size, "SAM SV DEBIT");
+            return true;
+        case CALYPSO_SAM_SV_RELOAD:
+            snprintf(exp, size, "SAM SV RELOAD");
             return true;
         case CALYPSO_GET_RESPONSE:
             snprintf(exp, size, "GET RESPONSE");

@@ -287,6 +287,7 @@ set (TARGET_SOURCES
         ${PM3_ROOT}/client/src/mifare/desfiretest.c
         ${PM3_ROOT}/client/src/mifare/gallaghercore.c
         ${PM3_ROOT}/client/src/mifare/gallaghertest.c
+        ${PM3_ROOT}/client/src/mifare/prime.c
         ${PM3_ROOT}/client/src/nfc/ndef.c
         ${PM3_ROOT}/client/src/qrcode/qrcode.c
         ${PM3_ROOT}/client/src/relay/relay_posix.c
@@ -330,6 +331,7 @@ set (TARGET_SOURCES
         ${PM3_ROOT}/client/src/cmdhfmfdes.c
         ${PM3_ROOT}/client/src/cmdhfmfhard.c
         ${PM3_ROOT}/client/src/cmdhfmfp.c
+        ${PM3_ROOT}/client/src/cmdhfmfsen.c
         ${PM3_ROOT}/client/src/cmdhfmfu.c
         ${PM3_ROOT}/client/src/cmdhfntag424.c
         ${PM3_ROOT}/client/src/cmdhfsaflok.c
@@ -743,6 +745,7 @@ target_link_libraries(pm3rrg_rdv4 PRIVATE
         pm3rrg_rdv4_hardnested
         pm3rrg_rdv4_id48
         pm3rrg_rdv4_mqtt
+        pm3rrg_rdv4_vec
         ${ADDITIONAL_LNK})
 
 if (NOT SKIPPTHREAD EQUAL 1)

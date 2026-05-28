@@ -47,6 +47,7 @@
 #include "fpga.h"
 #include "mifare/mifarehost.h"
 #include "crypto/originality.h"
+#include "cmdhfmfsen.h"     // Mifare Classic Static Nonce
 
 // Defines for Saflok parsing
 #define SAFLOK_YEAR_OFFSET 1980
@@ -64,6 +65,11 @@ typedef struct {
 } SaflokKeyLevel;
 
 static int CmdHelp(const char *Cmd);
+
+static int HFMFAutoPwnSEN(sector_t *e_sector, size_t sector_cnt) {
+    DropField();
+    return HFMFSENRecover(false, false, false, false, 0, 0x1, true, e_sector, sector_cnt);
+}
 
 // Static array for Saflok key levels
 static const SaflokKeyLevel saflok_key_levels[] = {
@@ -2171,7 +2177,7 @@ static int CmdHF14AMfNested(const char *Cmd) { //TODO: single mode broken? can't
                 break;
             case PM3_ESTATIC_NONCE:
                 PrintAndLogEx(ERR, "Static encrypted nonce detected. Aborted\n");
-                PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("script run fm11rf08s_recovery.py") "`");
+                PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("hf mf sen") "`");
                 break;
             case PM3_SUCCESS: {
 
@@ -2275,7 +2281,7 @@ static int CmdHF14AMfNested(const char *Cmd) { //TODO: single mode broken? can't
                             continue;
                         case PM3_ESTATIC_NONCE:
                             PrintAndLogEx(ERR, "Static encrypted nonce detected. Aborted\n");
-                            PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("script run fm11rf08s_recovery.py") "`");
+                            PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("hf mf sen") "`");
                             break;
                         case PM3_SUCCESS:
                             calibrate = false;
@@ -2864,7 +2870,7 @@ static int CmdHF14AMfNestedHard(const char *Cmd) {
             break;
         case PM3_ESTATIC_NONCE:
             PrintAndLogEx(ERR, "Static encrypted nonce detected. Aborted\n");
-            PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("script run fm11rf08s_recovery.py") "`");
+            PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("hf mf sen") "`");
             break;
         case PM3_EFAILED: {
             PrintAndLogEx(FAILED, "\nFailed to recover a key...");
@@ -3167,23 +3173,30 @@ static int CmdHF14AMfAutoPWN(const char *Cmd) {
     uint64_t key1 = 0;
 
     // iceman: todo, need to add all generated keys
+    uint8_t keyn = 0;
+
     mfc_algo_mizip_one(card.uid, 0, MF_KEY_A, &key1);
-    num_to_bytes(key1, MIFARE_KEY_SIZE, in_keys + key1_offset + (0 * MIFARE_KEY_SIZE));
+    num_to_bytes(key1, MIFARE_KEY_SIZE, in_keys + key1_offset + (keyn++ * MIFARE_KEY_SIZE));
 
     mfc_algo_di_one(card.uid, 0, MF_KEY_A, &key1);
-    num_to_bytes(key1, MIFARE_KEY_SIZE, in_keys + key1_offset + (1 * MIFARE_KEY_SIZE));
+    num_to_bytes(key1, MIFARE_KEY_SIZE, in_keys + key1_offset + (keyn++ * MIFARE_KEY_SIZE));
 
     mfc_algo_sky_one(card.uid, 15, MF_KEY_A, &key1);
-    num_to_bytes(key1, MIFARE_KEY_SIZE, in_keys + key1_offset + (2 * MIFARE_KEY_SIZE));
+    num_to_bytes(key1, MIFARE_KEY_SIZE, in_keys + key1_offset + (keyn++ * MIFARE_KEY_SIZE));
 
     // one key
     mfc_algo_saflok_one(card.uid, 0, MF_KEY_A, &key1);
-    num_to_bytes(key1, MIFARE_KEY_SIZE, in_keys + key1_offset + (3 * MIFARE_KEY_SIZE));
+    num_to_bytes(key1, MIFARE_KEY_SIZE, in_keys + key1_offset + (keyn++ * MIFARE_KEY_SIZE));
 
     mfc_algo_touch_one(card.uid, 0, MF_KEY_A, &key1);
-    num_to_bytes(key1, MIFARE_KEY_SIZE, in_keys + key1_offset + (4 * MIFARE_KEY_SIZE));
+    num_to_bytes(key1, MIFARE_KEY_SIZE, in_keys + key1_offset + (keyn++ * MIFARE_KEY_SIZE));
 
-    in_keys_len += (MIFARE_KEY_SIZE * 5);
+
+    memcpy(in_keys + key1_offset + (keyn++ * MIFARE_KEY_SIZE), g_mifare_default_key, MIFARE_KEY_SIZE);
+    memcpy(in_keys + key1_offset + (keyn++ * MIFARE_KEY_SIZE), g_mifare_mad_key, MIFARE_KEY_SIZE);
+    memcpy(in_keys + key1_offset + (keyn++ * MIFARE_KEY_SIZE), g_mifare_mad_key_b, MIFARE_KEY_SIZE);
+
+    in_keys_len += (MIFARE_KEY_SIZE * keyn);
 
     // detect MFC EV1 Signature
     bool is_ev1 = detect_mfc_ev1_signature();
@@ -3206,6 +3219,7 @@ static int CmdHF14AMfAutoPWN(const char *Cmd) {
         known_key = false;
     } else {
         num_to_bytes(key64, MIFARE_KEY_SIZE, key);
+        known_key = true;
     }
 
     // create/initialize key storage structure
@@ -3240,7 +3254,7 @@ static int CmdHF14AMfAutoPWN(const char *Cmd) {
     int has_staticnonce = detect_classic_static_nonce();
 
     // card prng type (weak=1 / hard=0 / select/card comm error = negative value)
-    if (has_staticnonce == NONCE_NORMAL)  {
+    if ((has_staticnonce == NONCE_NORMAL) || (has_staticnonce == NONCE_FAIL)) {
 
         prng_type = detect_classic_prng();
 
@@ -3256,6 +3270,13 @@ static int CmdHF14AMfAutoPWN(const char *Cmd) {
         } else {
             has_staticnonce = detect_classic_static_encrypted_nonce(0, MF_KEY_A, g_mifare_default_key);
         }
+    }
+
+    if (has_staticnonce == NONCE_STATIC_ENC) {
+        int sen_res = HFMFAutoPwnSEN(e_sector, sector_cnt);
+        free(e_sector);
+        free(fptr);
+        return sen_res;
     }
 
     // print parameters
@@ -3387,6 +3408,7 @@ static int CmdHF14AMfAutoPWN(const char *Cmd) {
 
     // Analyse the dictionary attack
     uint8_t num_found_keys = 0;
+    bool nested_attack_key_from_dictionary = false;
     for (int i = 0; i < sector_cnt; i++) {
         for (int j = MF_KEY_A; j <= MF_KEY_B; j++) {
 
@@ -3405,23 +3427,40 @@ static int CmdHF14AMfAutoPWN(const char *Cmd) {
                 known_key = true;
                 sectorno = i;
                 keytype = j;
-                PrintAndLogEx(SUCCESS, "Target sector " _GREEN_("%3u") " key type " _GREEN_("%c") " -- found valid key [ " _GREEN_("%s") " ] (used for nested / hardnested attack)",
-                              i,
-                              (j == MF_KEY_B) ? 'B' : 'A',
-                              sprint_hex_inrow(tmp_key, sizeof(tmp_key))
-                             );
-            } else {
-                PrintAndLogEx(SUCCESS, "Target sector " _GREEN_("%3u") " key type " _GREEN_("%c") " -- found valid key [ " _GREEN_("%s") " ]",
-                              i,
-                              (j == MF_KEY_B) ? 'B' : 'A',
-                              sprint_hex_inrow(tmp_key, sizeof(tmp_key))
-                             );
+                nested_attack_key_from_dictionary = true;
             }
         }
     }
 
     if (num_found_keys == sector_cnt * 2) {
         goto all_found;
+    }
+
+    if (known_key && ((has_staticnonce == NONCE_NORMAL) || (has_staticnonce == NONCE_FAIL))) {
+        has_staticnonce = detect_classic_static_encrypted_nonce(mfFirstBlockOfSector(sectorno), keytype, key);
+        if (has_staticnonce == NONCE_STATIC_ENC) {
+            int sen_res = HFMFAutoPwnSEN(e_sector, sector_cnt);
+            free(keyBlock);
+            free(e_sector);
+            free(fptr);
+            return sen_res;
+        }
+    }
+
+    for (int i = 0; i < sector_cnt; i++) {
+        for (int j = MF_KEY_A; j <= MF_KEY_B; j++) {
+            if (e_sector[i].foundKey[j] != 'D') {
+                continue;
+            }
+
+            num_to_bytes(e_sector[i].Key[j], MIFARE_KEY_SIZE, tmp_key);
+            PrintAndLogEx(SUCCESS, "Target sector " _GREEN_("%3u") " key type " _GREEN_("%c") " -- found valid key [ " _GREEN_("%s") " ]%s",
+                          i,
+                          (j == MF_KEY_B) ? 'B' : 'A',
+                          sprint_hex_inrow(tmp_key, sizeof(tmp_key)),
+                          (nested_attack_key_from_dictionary && i == sectorno && j == keytype) ? " (used for nested / hardnested attack)" : ""
+                         );
+        }
     }
 
     // Check if at least one sector key was found
@@ -3462,7 +3501,7 @@ noValidKeyFound:
 
             if (has_staticnonce == NONCE_STATIC_ENC) {
                 PrintAndLogEx(ERR, "Static encrypted nonce detected. Aborted\n");
-                PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("script run fm11rf08s_recovery.py") "`");
+                PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("hf mf sen") "`");
             }
 
             DropField();
@@ -3470,6 +3509,17 @@ noValidKeyFound:
             free(e_sector);
             free(fptr);
             return PM3_ESOFT;
+        }
+    }
+
+    if (known_key && has_staticnonce == NONCE_NORMAL) {
+        has_staticnonce = detect_classic_static_encrypted_nonce(mfFirstBlockOfSector(sectorno), keytype, key);
+        if (has_staticnonce == NONCE_STATIC_ENC) {
+            int sen_res = HFMFAutoPwnSEN(e_sector, sector_cnt);
+            free(keyBlock);
+            free(e_sector);
+            free(fptr);
+            return sen_res;
         }
     }
 
@@ -3624,17 +3674,12 @@ tryNested:
                                 break;
                             }
                             case PM3_ESTATIC_NONCE: {
-                                PrintAndLogEx(ERR, "Static encrypted nonce detected. Aborted\n");
-                                PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("script run fm11rf08s_recovery.py") "`");
-
                                 e_sector[current_sector_i].Key[current_key_type_i] = 0xffffffffffff;
                                 e_sector[current_sector_i].foundKey[current_key_type_i] = false;
-                                // Show the results to the user
-                                printKeyTable(sector_cnt, e_sector);
-                                PrintAndLogEx(NORMAL, "");
+                                int sen_res = HFMFAutoPwnSEN(e_sector, sector_cnt);
                                 free(e_sector);
                                 free(fptr);
-                                return isOK;
+                                return sen_res;
                             }
                             case PM3_SUCCESS: {
                                 calibrate = false;
@@ -3687,15 +3732,12 @@ tryHardnested: // If the nested attack fails then we try the hardnested attack
                                     break;
                                 }
                                 case PM3_ESTATIC_NONCE: {
-                                    PrintAndLogEx(ERR, "\nError: Static encrypted nonce detected. Aborted\n");
-
                                     e_sector[current_sector_i].Key[current_key_type_i] = 0xffffffffffff;
                                     e_sector[current_sector_i].foundKey[current_key_type_i] = false;
-
-                                    // Show the results to the user
-                                    printKeyTable(sector_cnt, e_sector);
-                                    PrintAndLogEx(NORMAL, "");
-                                    break;
+                                    int sen_res = HFMFAutoPwnSEN(e_sector, sector_cnt);
+                                    free(e_sector);
+                                    free(fptr);
+                                    return sen_res;
                                 }
                                 case PM3_EFAILED: {
                                     PrintAndLogEx(FAILED, "\nFailed to recover a key...");
@@ -5049,7 +5091,7 @@ void printKeyTableEx(size_t sectorscnt, sector_t *e_sector, uint8_t start_sector
                       _YELLOW_("H") ":Hardnested / "
                       _YELLOW_("C") ":statiCnested / "
                       _YELLOW_("A") ":keyA "
-                      " )"
+                            " )"
                      );
         if (sectorscnt == 18) {
             PrintAndLogEx(INFO, "( " _MAGENTA_("*") " ) These sectors used for signature. Lays outside of user memory");
@@ -10699,7 +10741,7 @@ static int CmdHF14AMfInfo(const char *Cmd) {
     }
 
     if (res == NONCE_STATIC_ENC) {
-        PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("script run fm11rf08s_recovery.py") "`");
+        PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("hf mf sen") "`");
     }
 
 out:
@@ -10762,6 +10804,7 @@ static int CmdHF14AMfISEN(const char *Cmd) {
     } else if (arg_get_lit(ctx, 3)) {
         keytype = MF_KEY_B;
     }
+
     uint8_t prev_keytype = keytype;
     keytype = arg_get_int_def(ctx, 4, keytype);
     if ((arg_get_lit(ctx, 2) || arg_get_lit(ctx, 3)) && (keytype != prev_keytype)) {
@@ -10786,6 +10829,7 @@ static int CmdHF14AMfISEN(const char *Cmd) {
     } else if (arg_get_lit(ctx, 8)) {
         keytype_nested = MF_KEY_B;
     }
+
     uint8_t prev_keytype_nested = keytype_nested;
     keytype_nested = arg_get_int_def(ctx, 9, keytype_nested);
     if ((arg_get_lit(ctx, 7) || arg_get_lit(ctx, 8)) && (keytype_nested != prev_keytype_nested)) {
@@ -10808,6 +10852,7 @@ static int CmdHF14AMfISEN(const char *Cmd) {
         PrintAndLogEx(WARNING, "Choose one single type of reset");
         return PM3_EINVARG;
     }
+
     bool addread = arg_get_lit(ctx, 14);
     bool addauth = arg_get_lit(ctx, 15);
     bool incblk2 = arg_get_lit(ctx, 16);
@@ -10818,15 +10863,18 @@ static int CmdHF14AMfISEN(const char *Cmd) {
     if (collect_fm11rf08s_with_data) {
         collect_fm11rf08s = 1;
     }
+
     bool collect_fm11rf08s_without_backdoor = arg_get_lit(ctx, 23);
     if (collect_fm11rf08s_without_backdoor) {
         collect_fm11rf08s = 1;
     }
+
     if (collect_fm11rf08s_with_data && collect_fm11rf08s_without_backdoor) {
         CLIParserFree(ctx);
         PrintAndLogEx(WARNING, "Don't mix with_data and without_backdoor options");
         return PM3_EINVARG;
     }
+
     int fnlen = 0;
     char filename[FILE_PATH_SIZE] = {0};
     CLIParamStrToBuf(arg_get_str(ctx, 24), (uint8_t *)filename, FILE_PATH_SIZE, &fnlen);
@@ -10959,7 +11007,7 @@ static int CmdHF14AMfISEN(const char *Cmd) {
     }
 
     if (res == NONCE_STATIC_ENC) {
-        PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("script run fm11rf08s_recovery.py") "`");
+        PrintAndLogEx(HINT, "Hint: Try `" _YELLOW_("hf mf sen") "`");
     }
 
     if (setDeviceDebugLevel(dbg_curr, false) != PM3_SUCCESS) {
@@ -11086,6 +11134,7 @@ static command_t CommandTable[] = {
     {"nested",      CmdHF14AMfNested,       IfPm3Iso14443a,  "Nested attack"},
     {"hardnested",  CmdHF14AMfNestedHard,   AlwaysAvailable, "Nested attack for hardened MIFARE Classic cards"},
     {"staticnested", CmdHF14AMfNestedStatic, IfPm3Iso14443a, "Nested attack against static nonce MIFARE Classic cards"},
+    {"sen",         CmdHF14AMfSEN,          IfPm3Iso14443a,  "FM11RF08S Static Encrypted Nonce attack"},
     {"brute",       CmdHF14AMfSmartBrute,   IfPm3Iso14443a,  "Smart bruteforce to exploit weak key generators"},
     {"autopwn",     CmdHF14AMfAutoPWN,      IfPm3Iso14443a,  "Automatic key recovery tool for MIFARE Classic"},
 //    {"keybrute",    CmdHF14AMfKeyBrute,     IfPm3Iso14443a,  "J_Run's 2nd phase of multiple sector nested authentication key recovery"},
