@@ -1035,19 +1035,28 @@ static int CmdHF14BSriSim(const char *Cmd) {
                   "Use -s to force a fixed 8-bit Chip_ID (hex, e.g. A0).\n"
                   "Use -0 to force slot 0 (tag always responds to PCALL16 immediately).\n"
                   "Use -n to disable field-loss detection.\n"
-                  "Warning: -n breaks proper anticollision (INITIATE from any state resets it).",
-                  "hf 14b simsrx -f hf-14b-D002325D27D47C2A-dump.json\n"
-                  "hf 14b simsrx -f hf-14b-D002325D27D47C2A-dump.json -s A0\n"
-                  "hf 14b simsrx -f hf-14b-D002325D27D47C2A-dump.json -0\n"
-                  "hf 14b simsrx -f hf-14b-D002325D27D47C2A-dump.json -n"
+                  "Warning: -n breaks proper anticollision (INITIATE from any state resets it).\n"
+                  "Use --saveconfig to store the dump and simulation settings to PM3 flash for\n"
+                  "  standalone mode (does NOT start the simulation).\n"
+                  "Use --eraseconfig to clear the stored standalone config from PM3 flash.",
+                  "hf 14b simsrx -f hf-14b-D0102321D27D47C1A-dump.json\n"
+                  "hf 14b simsrx -f hf-14b-D0102321D27D47C1A-dump.json -s A0\n"
+                  "hf 14b simsrx -f hf-14b-D0102321D27D47C1A-dump.json -0\n"
+                  "hf 14b simsrx -f hf-14b-D0102321D27D47C1A-dump.json -n\n"
+                  "hf 14b simsrx -f hf-14b-D0102321D27D47C1A-dump.json -n --saveconfig\n"
+                  "hf 14b simsrx --eraseconfig"
                  );
 
     void *argtable[] = {
         arg_param_begin,
-        arg_str1("f", "file",         "<fn>",  "Filename of dump (bin/eml/json)"),
+        arg_str0("f", "file",         "<fn>",  "Filename of dump (bin/eml/json)"),
         arg_str0("s", "static-chipid","<hex>", "Use a fixed 8-bit Chip_ID value (disables random, e.g. A0)"),
         arg_lit0("0", "slot0",                 "Force slot 0 - tag always responds to PCALL16 at slot 0"),
         arg_lit0("n", "nfl",                   "Disable field-loss detection"),
+        arg_int0("d", "debug",         "<0-4>","Debug level for standalone mode (0=off, 4=verbose)"),
+        arg_lit0(NULL,"trace",                 "Enable tracing for simulation and standalone mode"),
+        arg_lit0(NULL,"saveconfig",            "Save settings + dump to PM3 flash for standalone mode"),
+        arg_lit0(NULL,"eraseconfig",           "Erase stored standalone config from PM3 flash"),
         arg_param_end
     };
     CLIExecWithReturn(ctx, Cmd, argtable, false);
@@ -1071,10 +1080,37 @@ static int CmdHF14BSriSim(const char *Cmd) {
     if (arg_get_lit(ctx, 4))
         flags |= SRT512_FLAG_NO_FIELD_LOSS;
 
+    int debug_level = arg_get_int_def(ctx, 5, 0);
+    bool do_trace      = arg_get_lit(ctx, 6);
+    bool do_saveconfig = arg_get_lit(ctx, 7);
+    bool do_erase      = arg_get_lit(ctx, 8);
+
+    if (do_trace)
+        flags |= SRT512_FLAG_TRACE;
+
     CLIParserFree(ctx);
 
+    // -- eraseconfig: clear both flash pages, no sim --
+    if (do_erase) {
+        if (!g_session.pm3_present) return PM3_ENOTTY;
+        PrintAndLogEx(INFO, "Erasing SRT512 standalone config from PM3 flash...");
+        clearCommandBuffer();
+        SendCommandNG(CMD_HF_ISO14443B_STANDALONE_ERASE, NULL, 0);
+        PacketResponseNG resp;
+        if (WaitForResponseTimeout(CMD_HF_ISO14443B_STANDALONE_ERASE, &resp, 3000)) {
+            if (resp.status == PM3_SUCCESS)
+                PrintAndLogEx(SUCCESS, "Standalone config erased");
+            else
+                PrintAndLogEx(FAILED, "Erase failed (status %d)", resp.status);
+        } else {
+            PrintAndLogEx(WARNING, "Timeout waiting for erase response");
+        }
+        return PM3_SUCCESS;
+    }
+
+    // -- saveconfig or normal sim: require a file --
     if (fnlen == 0) {
-        PrintAndLogEx(ERR, "No filename provided");
+        PrintAndLogEx(ERR, "No filename provided (use -f <dump>)");
         return PM3_EINVARG;
     }
 
@@ -1102,6 +1138,58 @@ static int CmdHF14BSriSim(const char *Cmd) {
     // Extract UID from filename (hf-14b-<UID>-dump.json format)
     uint8_t *uid = get_uid_from_filename(filename);
 
+    // -- saveconfig: write settings + dump to PM3 internal flash, no sim --
+    if (do_saveconfig) {
+        if (!g_session.pm3_present) {
+            free(data);
+            return PM3_ENOTTY;
+        }
+
+        // Build config struct (settings only — preserved across standalone scans)
+        // sizeof(srt512_sa_config_t) must be 256; verified by static assert below
+        uint8_t payload[512];
+        memset(payload, 0, sizeof(payload));
+
+        uint32_t cfg_magic = 0x53525431UL;  // "SRT1"
+        memcpy(payload + 0,  &cfg_magic,     4);   // magic
+        memcpy(payload + 4,  &flags,         4);   // flags
+        payload[8]  = static_chipid;               // static_chipid
+        payload[9]  = (uint8_t)(debug_level & 0xFF); // debug_level
+        payload[10] = do_trace ? 1 : 0;            // tracing
+        // bytes 11-255: reserved (zeroed)
+
+        // Build dump struct (tag data — overwritten by standalone scan)
+        // offset 256 in payload
+        uint32_t dump_magic = 0x53525431UL;
+        memcpy(payload + 256,       &dump_magic, 4);           // magic
+        memcpy(payload + 256 + 4,   uid,         8);           // uid
+        memcpy(payload + 256 + 12,  data,        num_blocks * ST25TB_SR_BLOCK_SIZE); // blocks
+        payload[256 + 12 + 68] = num_blocks;                   // num_blocks at offset 80
+        // bytes 256+81 to 511: reserved (zeroed)
+
+        free(data);
+
+        PrintAndLogEx(INFO, "Saving standalone config to PM3 flash...");
+        PrintAndLogEx(INFO, "      UID: " _GREEN_("%s"), sprint_hex(uid, 8));
+        PrintAndLogEx(INFO, "   Blocks: %u", num_blocks);
+        PrintAndLogEx(INFO, "    Flags: 0x%08X", flags);
+        PrintAndLogEx(INFO, "    Debug: %d  Trace: %s", debug_level, do_trace ? "yes" : "no");
+
+        clearCommandBuffer();
+        SendCommandNG(CMD_HF_ISO14443B_STANDALONE_CFG, payload, sizeof(payload));
+        PacketResponseNG resp;
+        if (WaitForResponseTimeout(CMD_HF_ISO14443B_STANDALONE_CFG, &resp, 5000)) {
+            if (resp.status == PM3_SUCCESS)
+                PrintAndLogEx(SUCCESS, "Standalone config saved.");
+            else
+                PrintAndLogEx(FAILED, "Save failed (status %d)", resp.status);
+        } else {
+            PrintAndLogEx(WARNING, "Timeout waiting for save response");
+        }
+        return PM3_SUCCESS;
+    }
+
+    // -- normal simulation --
     PrintAndLogEx(INFO, "Simulating SRT512 tag...");
     PrintAndLogEx(INFO, "      UID: " _GREEN_("%s"), sprint_hex(uid, 8));
     PrintAndLogEx(INFO, "   Blocks: %d loaded", num_blocks);
@@ -1115,6 +1203,7 @@ static int CmdHF14BSriSim(const char *Cmd) {
         PrintAndLogEx(INFO, "   Field-loss: disabled (-n)");
     else
         PrintAndLogEx(INFO, "   Field-loss: enabled");
+    PrintAndLogEx(INFO, "      Trace: %s", (flags & SRT512_FLAG_TRACE) ? "enabled" : "disabled");
     PrintAndLogEx(INFO, "Press " _GREEN_("pm3 button") " to abort simulation");
 
     // Build payload: 8 bytes UID + num_blocks*4 bytes block data

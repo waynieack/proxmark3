@@ -785,6 +785,12 @@ typedef struct {
 #define SRT512_FLAG_FORCE_SLOT0    (1u << 0)  // always use slot 0 after chip_id randomization
 #define SRT512_FLAG_STATIC_CHIPID  (1u << 1)  // disable random chip_id; use oldarg[1] value
 #define SRT512_FLAG_NO_FIELD_LOSS  (1u << 2)  // disable field-loss detection (for always-on readers)
+#define SRT512_FLAG_TRACE          (1u << 3)  // enable trace capture during simulation
+// Standalone flash storage commands
+// payload: srt512_sa_config_t (256 bytes) followed by srt512_sa_dump_t (256 bytes)
+#define CMD_HF_ISO14443B_STANDALONE_CFG   0x03D5
+// no payload; erases both config and dump pages
+#define CMD_HF_ISO14443B_STANDALONE_ERASE 0x03D6
 
 // For measurements of the antenna tuning
 #define CMD_MEASURE_ANTENNA_TUNING 0x0400

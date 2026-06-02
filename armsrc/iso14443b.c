@@ -188,7 +188,7 @@
 // 4sample
 #define SEND4STUFFBIT(x) tosend_stuffbit(!(x));tosend_stuffbit(!(x));tosend_stuffbit(!(x));tosend_stuffbit(!(x));
 
-static void iso14b_set_timeout(uint32_t timeout_etu);
+void iso14b_set_timeout(uint32_t timeout_etu);
 static void iso14b_set_maxframesize(uint16_t size);
 static void iso14b_set_fwt(uint8_t fwt);
 
@@ -461,6 +461,10 @@ static struct {
     uint8_t  *output;
 } Uart;
 
+// SOF detection thresholds consumed by Handle14443bSampleFromReader().
+static volatile uint8_t s_uart14b_unsync_ones_min = 9;
+static volatile uint8_t s_uart14b_sof_zero_min = 9;
+
 static void Uart14bReset(void) {
     Uart.state = STATE_14B_UNSYNCD;
     Uart.shiftReg = 0;
@@ -476,7 +480,7 @@ static void Uart14bInit(uint8_t *data) {
 }
 
 // param timeout accepts ETU
-static void iso14b_set_timeout(uint32_t timeout_etu) {
+void iso14b_set_timeout(uint32_t timeout_etu) {
 
     uint32_t ssp = HF14_ETU_TO_SSP(timeout_etu);
 
@@ -566,13 +570,13 @@ static void Demod14bInit(uint8_t *data, uint16_t max_len) {
  * Returns: true if we received a EOF
  *          false if we are still waiting for some more
  */
-static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit, const uint8_t *unsync_ones_min_ptr, const uint8_t *sof_zero_min_ptr) {
+static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit) {
     switch (Uart.state) {
         case STATE_14B_UNSYNCD:
             if (bit) {
                 // count consecutive carrier-ON samples, cap at 10 to avoid overflow
                 if (Uart.bitCnt < 10) Uart.bitCnt++;
-            } else if (Uart.bitCnt >= (unsync_ones_min_ptr != NULL ? *unsync_ones_min_ptr : 9)) {
+            } else if (Uart.bitCnt >= s_uart14b_unsync_ones_min) {
                 // carrier was ON long enough before this falling edge: real SOF
                 Uart.state = STATE_14B_GOT_FALLING_EDGE_OF_SOF;
                 Uart.posCnt = 0;
@@ -589,7 +593,7 @@ static RAMFUNC int Handle14443bSampleFromReader(uint8_t bit, const uint8_t *unsy
             if (Uart.posCnt == 2) { // sample every 4 1/fs in the middle of a bit
 
                 if (bit) {
-                    if (Uart.bitCnt > (sof_zero_min_ptr != NULL ? *sof_zero_min_ptr : 9)) {
+                    if (Uart.bitCnt > s_uart14b_sof_zero_min) {
                         // we've seen enough consecutive
                         // zeros that it's a valid SOF
                         Uart.posCnt = 0;
@@ -726,7 +730,7 @@ static bool GetIso14443bCommandFromReader(uint8_t *received, uint16_t *len) {
         if (AT91C_BASE_SSC->SSC_SR & (AT91C_SSC_RXRDY)) {
             uint8_t b = (uint8_t)AT91C_BASE_SSC->SSC_RHR;
             for (uint8_t mask = 0x80; mask != 0x00; mask >>= 1) {
-                if (Handle14443bSampleFromReader(b & mask, NULL, NULL)) {
+                if (Handle14443bSampleFromReader(b & mask)) {
                     *len = Uart.byteCnt;
                     return true;
                 }
@@ -2429,18 +2433,7 @@ static void srt512_encode_chipid(uint8_t chip_id,
     CodeIso14443bAsTag(resp_select, 3);  memcpy(enc_select, ts->buf, enc_select_len);
 }
 
-// Global debug FIFO for SOF phase-slip tracing (raw SSC bytes).
-#define SRT512_SOF_FIFO_BYTES 512
-static uint8_t g_srt512_byte_fifo[SRT512_SOF_FIFO_BYTES];
-static uint16_t g_srt512_byte_head;
 
-// Pre-buffer: SSC bytes are staged here before being pushed to the FIFO/snap.
-// When a complete SRT512_PREBUF_SIZE block is all-0xFF (idle carrier) it is
-// silently discarded, keeping the capture buffers dense with real signal data.
-// Partial blocks are flushed unconditionally before any debug dump.
-#define SRT512_PREBUF_SIZE 8
-static uint8_t  g_srt512_prebuf[SRT512_PREBUF_SIZE];
-static uint8_t  g_srt512_prebuf_len;
 
 // SRI512 / SRT512 tag emulation.
 // Handles the SRx anticollision & memory commands so a reader sees a valid tag.
@@ -2451,8 +2444,22 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
     const bool force_slot0       = (flags & SRT512_FLAG_FORCE_SLOT0)   != 0;
     const bool use_static_chipid  = (flags & SRT512_FLAG_STATIC_CHIPID) != 0;
     const bool no_field_loss      = (flags & SRT512_FLAG_NO_FIELD_LOSS) != 0;
-    bool _pb_all_ff = true;
-    bool trace = false;
+    const bool trace              = (flags & SRT512_FLAG_TRACE)         != 0;
+
+    
+    // Debug FIFO for tracing (raw SSC bytes).
+    //#define SRT512_SOF_FIFO_BYTES 512
+    //static uint8_t srt512_byte_fifo[SRT512_SOF_FIFO_BYTES];
+    //static uint16_t srt512_byte_head;
+                        
+    // Pre-buffer: SSC bytes are staged here before being pushed to the FIFO/snap.
+    // When a complete SRT512_PREBUF_SIZE block is all-0xFF (idle carrier) it is
+    // silently discarded, keeping the capture buffers dense with real signal data.
+    // Partial blocks are flushed unconditionally before any debug dump.
+    //#define SRT512_PREBUF_SIZE 8
+    //static uint8_t  srt512_prebuf[SRT512_PREBUF_SIZE];
+    //static uint8_t  srt512_prebuf_len;
+    //bool _pb_all_ff = true;
 
     LED_A_ON();
 
@@ -2508,7 +2515,8 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
 
     BigBuf_free();
     BigBuf_Clear_ext(false);
-    if (trace) { clear_trace(); set_tracing(true); }
+    clear_trace(); 
+    set_tracing(trace);
 
     const tosend_t *ts = get_tosend();
 
@@ -2568,8 +2576,9 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
     uint32_t frame_start_ssp = 0;  // ssp_count at start of current reader frame
     uint32_t field_loss_early_consec = 0;  // field lost while in READY/INVENTORY (not yet selected)
     uint32_t ready_after_inv_consec = 0;   // state dropped back to READY from SELECTED/DESELECTED
-    uint8_t unsync_ones_min = 5;
-    uint8_t sof_zero_min = 6;
+    s_uart14b_unsync_ones_min = 5;
+    s_uart14b_sof_zero_min = 6;
+
 
     while (BUTTON_PRESS() == false) {
         WDT_HIT();
@@ -2609,8 +2618,8 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
                     LED_A_ON();
                     // Relax SOF thresholds for the first frame after field loss to catch
                     // ramp-corrupted INITIATE. Restored on INITIATE receive or CRC FAIL.
-                    unsync_ones_min = 5;
-                    sof_zero_min = 6;
+                    s_uart14b_unsync_ones_min = 5;
+                    s_uart14b_sof_zero_min = 6;
                     if (g_dbglevel >= DBG_DEBUG && (field_loss_early_consec > 0 || ready_after_inv_consec > 0))
                         Dbprintf("SRT512: field returned, back to READY. Early losses: %u, post-select losses: %u",
                                  field_loss_early_consec, ready_after_inv_consec);
@@ -2633,21 +2642,21 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
         // Stage rx_byte into the pre-buffer.  When a full SRT512_PREBUF_SIZE block
         // accumulates, discard it if every byte is 0xFF (idle carrier), otherwise
         // push it to the debug FIFO and post-SELECT snapshot.
-        if (g_dbglevel >= DBG_EXTENDED) {
-            g_srt512_prebuf[g_srt512_prebuf_len++] = rx_byte;
-            if (rx_byte != 0xFF) { _pb_all_ff = false; }
-            if (g_srt512_prebuf_len == SRT512_PREBUF_SIZE) {
-                if (!_pb_all_ff) {
-                    // SRT512_PREBUF_SIZE (8) divides SRT512_SOF_FIFO_BYTES (512) exactly
-                    // and head is always a multiple of 8, so this never wraps mid-block.
-                    // GCC emits LDMIA/STMIA (2 instructions) for the 8-byte copy.
-                    memcpy(&g_srt512_byte_fifo[g_srt512_byte_head], g_srt512_prebuf, SRT512_PREBUF_SIZE);
-                    g_srt512_byte_head = (g_srt512_byte_head + SRT512_PREBUF_SIZE) & (SRT512_SOF_FIFO_BYTES - 1);
-                }
-                g_srt512_prebuf_len = 0;
-                _pb_all_ff = true;
-            }
-        }
+        //if (g_dbglevel >= DBG_EXTENDED) {
+        //    srt512_prebuf[srt512_prebuf_len++] = rx_byte;
+        //    if (rx_byte != 0xFF) { _pb_all_ff = false; }
+        //    if (srt512_prebuf_len == SRT512_PREBUF_SIZE) {
+        //        if (!_pb_all_ff) {
+        //            // SRT512_PREBUF_SIZE (8) divides SRT512_SOF_FIFO_BYTES (512) exactly
+        //            // and head is always a multiple of 8, so this never wraps mid-block.
+        //            // GCC emits LDMIA/STMIA (2 instructions) for the 8-byte copy.
+        //            memcpy(&srt512_byte_fifo[srt512_byte_head], srt512_prebuf, SRT512_PREBUF_SIZE);
+        //            srt512_byte_head = (srt512_byte_head + SRT512_PREBUF_SIZE) & (SRT512_SOF_FIFO_BYTES - 1);
+        //        }
+        //        srt512_prebuf_len = 0;
+        //        _pb_all_ff = true;
+        //    }
+        //}
 
         bool frame_done = false;
         if (Uart.state == STATE_14B_UNSYNCD) {
@@ -2655,7 +2664,7 @@ void SimulateSRT512Tag(const uint8_t *uid, const uint8_t *blocks, uint8_t num_bl
         }
 
         for (uint8_t mask = 0x80; mask != 0x00; mask >>= 1) {
-            if (Handle14443bSampleFromReader(rx_byte & mask, &unsync_ones_min, &sof_zero_min)) {
+            if (Handle14443bSampleFromReader(rx_byte & mask)) {
                 len = Uart.byteCnt;
                 frame_done = true;
                 break;
@@ -2697,34 +2706,32 @@ srt512_dispatch:
         ;  // empty statement needed after label before a declaration
         uint8_t cmd_byte = receivedCmd[0];
 
-        // When field-loss detection is disabled, INITIATE from SELECTED or DESELECTED resets the state machine.
-        if (no_field_loss && cmd_byte == ISO14443B_INITIATE && receivedCmd[1] == 0x00 && len == 4
-            && (tagState == 3 || tagState == 4)) {
-            ready_after_inv_consec++;
-            if (g_dbglevel >= DBG_ERROR && ready_after_inv_consec >= 2)
-                Dbprintf("SRT512: [%s] INITIATE -> reset to READY #%u consecutive", tagState == 3 ? "SELECTED" : "DESELECTED", ready_after_inv_consec);
-            tagState = 1; //READY
-        }
-
         if (cmd_byte == ISO14443B_INITIATE && len == 4) {
             if (receivedCmd[1] == 0x00) {
                 // Restore defaults after INIT.
-                unsync_ones_min = 9;
-                sof_zero_min = 7;
+                s_uart14b_unsync_ones_min = 9;
+                s_uart14b_sof_zero_min = 7;
+                // When field-loss detection is disabled, INITIATE from SELECTED or DESELECTED resets the state machine.
+                if (no_field_loss && (tagState == 3 || tagState == 4)) {
+                    ready_after_inv_consec++;
+                    if (g_dbglevel >= DBG_ERROR && ready_after_inv_consec >= 2)
+                        Dbprintf("SRT512: [%s] INITIATE -> reset to READY #%u consecutive", tagState == 3 ? "SELECTED" : "DESELECTED", ready_after_inv_consec);
+                    tagState = 1; //READY
+                }
             } else if (receivedCmd[1] == 0x04 && no_field_loss) {
                 // no_field_loss mode has no vHf transition marker. Use PCALL16 as the
                 // trigger to temporarily relax SOF thresholds for the following INITIATE.
-                unsync_ones_min = 5;
-                sof_zero_min = 6;
+                s_uart14b_unsync_ones_min = 5;
+                s_uart14b_sof_zero_min = 6;
             }
         } else if (cmd_byte == ISO14443B_SELECT && len == 4) {
             // Some times we get a GET_UID with a short SOF relax the SOF thresholds so we catch the GET_UID
-            unsync_ones_min = 9;
-            sof_zero_min = 5;
+            s_uart14b_unsync_ones_min = 9;
+            s_uart14b_sof_zero_min = 5;
         } else if (cmd_byte == ISO14443B_GET_UID && len == 3) {
             // Restore defaults after GET_UID.
-            unsync_ones_min = 9;
-            sof_zero_min = 7;
+            s_uart14b_unsync_ones_min = 9;
+            s_uart14b_sof_zero_min = 7;
         }
 
         if (tagState == 1) {
@@ -2980,55 +2987,52 @@ srt512_next_frame:
             // Gating on ready_after_inv_consec >= 2 means the dump fires ONLY
             // when we are already desynchronised — so the Dbprintf latency
             // (which can be several ms) cannot disrupt a healthy transaction.
-            if (g_dbglevel >= DBG_EXTENDED && cmd_byte == ISO14443B_INITIATE && len == 4
-                     && ((receivedCmd[1] == 0x00 && ready_after_inv_consec >= 2) || receivedCmd[1] == 0x04)) {
-	            static const char _hex[] = "0123456789ABCDEF";
-                char _fl[49];
-                Dbprintf("  -- SELECT dump (last 512 bytes) --");
-                for (int _l = 0; _l < 32; _l++) {
-                    uint8_t _p = 0;
-                    bool _all_ff = true;
-                    for (int _b = 0; _b < 16; _b++) {
-                        uint16_t _i = (g_srt512_byte_head + (uint16_t)(_l * 16 + _b)) & (SRT512_SOF_FIFO_BYTES - 1);
-                        uint8_t _v = g_srt512_byte_fifo[_i];
-                        if (_v != 0xFF) _all_ff = false;
-                        _fl[_p++] = _hex[_v >> 4];
-                        _fl[_p++] = _hex[_v & 0x0F];
-                        if (_b != 15) _fl[_p++] = ' ';
-                    }
-                    _fl[_p] = '\0';
-                    if (!_all_ff) Dbprintf("  [%3d] %s", _l * 16, _fl);
-                }
-                // Print any partial pre-buffer (bytes received since last full 8-byte block).
-                // These are the most recent in-flight bytes and complete the last command.
-                // Printed separately to preserve the 8-byte ring-alignment invariant.
-                if (g_srt512_prebuf_len > 0) {
-                    uint8_t _p = 0;
-                    for (uint8_t _pi = 0; _pi < g_srt512_prebuf_len; _pi++) {
-                        uint8_t _v = g_srt512_prebuf[_pi];
-                        _fl[_p++] = _hex[_v >> 4];
-                        _fl[_p++] = _hex[_v & 0x0F];
-                        if (_pi < g_srt512_prebuf_len - 1) _fl[_p++] = ' ';
-                    }
-                    _fl[_p] = '\0';
-                    Dbprintf("  [+%u] %s", (unsigned)g_srt512_prebuf_len, _fl);
-                }
-                g_srt512_prebuf_len = 0;
-                _pb_all_ff = true;
-            }
+            //if (g_dbglevel >= DBG_EXTENDED && cmd_byte == ISO14443B_INITIATE && len == 4
+            //         && ((receivedCmd[1] == 0x00 && ready_after_inv_consec >= 2) || receivedCmd[1] == 0x04)) {
+	        //    static const char _hex[] = "0123456789ABCDEF";
+            //    char _fl[49];
+            //    Dbprintf("  -- SELECT dump (last 512 bytes) --");
+            //    for (int _l = 0; _l < 32; _l++) {
+            //        uint8_t _p = 0;
+            //        bool _all_ff = true;
+            //        for (int _b = 0; _b < 16; _b++) {
+            //            uint16_t _i = (srt512_byte_head + (uint16_t)(_l * 16 + _b)) & (SRT512_SOF_FIFO_BYTES - 1);
+            //            uint8_t _v = srt512_byte_fifo[_i];
+            //            if (_v != 0xFF) _all_ff = false;
+            //            _fl[_p++] = _hex[_v >> 4];
+            //            _fl[_p++] = _hex[_v & 0x0F];
+            //            if (_b != 15) _fl[_p++] = ' ';
+            //        }
+            //        _fl[_p] = '\0';
+            //        if (!_all_ff) Dbprintf("  [%3d] %s", _l * 16, _fl);
+            //    }
+            //    // Print any partial pre-buffer (bytes received since last full 8-byte block).
+            //    // These are the most recent in-flight bytes and complete the last command.
+            //    // Printed separately to preserve the 8-byte ring-alignment invariant.
+            //    if (srt512_prebuf_len > 0) {
+            //        uint8_t _p = 0;
+            //        for (uint8_t _pi = 0; _pi < srt512_prebuf_len; _pi++) {
+            //            uint8_t _v = srt512_prebuf[_pi];
+            //            _fl[_p++] = _hex[_v >> 4];
+            //            _fl[_p++] = _hex[_v & 0x0F];
+            //            if (_pi < srt512_prebuf_len - 1) _fl[_p++] = ' ';
+            //        }
+            //        _fl[_p] = '\0';
+            //        Dbprintf("  [+%u] %s", (unsigned)srt512_prebuf_len, _fl);
+            //    }
+            //    srt512_prebuf_len = 0;
+            //    _pb_all_ff = true;
+            //}
 
 
             // Delay next field check after every TX so we don't sample vHf
             // in the brief quiet window while the reader is processing our response.
             if (!no_field_loss)
                 field_check_tick = GetTickCount();
-
-
         }
         Uart14bInit(receivedCmd);
         len = 0;
         in_tx = false;
-        //g_srt512_prebuf_len = 0;  // discard any partial pre-buffer; next frame starts fresh
     }
 
     if (g_dbglevel >= DBG_ERROR)
@@ -3223,7 +3227,7 @@ void SniffIso14443b(void) {
         // no need to try decoding reader data if the tag is sending
         if (tag_is_active == false) {
 
-            if (Handle14443bSampleFromReader(ci & 0x01, NULL, NULL)) {
+            if (Handle14443bSampleFromReader(ci & 0x01)) {
                 uint32_t eof_time = dma_start_time + (samples * 16) + 8; // - DELAY_READER_TO_ARM_SNIFF; // end of EOF
                 if (Uart.byteCnt > 0) {
                     uint32_t sof_time = eof_time
@@ -3238,7 +3242,7 @@ void SniffIso14443b(void) {
                 expect_tag_answer = true;
             }
 
-            if (Handle14443bSampleFromReader(cq & 0x01, NULL, NULL)) {
+            if (Handle14443bSampleFromReader(cq & 0x01)) {
 
                 uint32_t eof_time = dma_start_time + (samples * 16) + 16; // - DELAY_READER_TO_ARM_SNIFF; // end of EOF
                 if (Uart.byteCnt > 0) {

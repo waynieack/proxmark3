@@ -65,4 +65,32 @@ hf14b_config_t *getHf14bConfig(void);
 #define SIM_HALT        3
 #define SIM_ACTIVE      4
 
+// ---- SRT512 standalone flash storage ------------------------------------
+// Structs shared between appmain.c dispatch and hf_srt512_sa.c storage code.
+// Address defines and function implementations live in hf_srt512_sa.c.
+#define SRT512_SA_MAGIC  0x53525431UL  // "SRT1"
+
+// Persisted simulation settings.  Written by --saveconfig.
+// NEVER overwritten by a standalone scan — scan updates only the dump page.
+typedef struct {
+    uint32_t magic;           // SRT512_SA_MAGIC
+    uint32_t flags;           // SRT512_FLAG_* bits
+    uint8_t  static_chipid;   // used when SRT512_FLAG_STATIC_CHIPID set
+    uint8_t  debug_level;     // 0-4
+    uint8_t  tracing;         // 1 = enable tracing
+    uint8_t  reserved[245];   // pad to exactly 256 bytes
+} srt512_sa_config_t;         // sizeof == 256
+
+// Persisted tag data.  Written by --saveconfig AND overwritten by standalone scan.
+typedef struct {
+    uint32_t magic;           // SRT512_SA_MAGIC
+    uint8_t  uid[8];          // 8-byte UID
+    uint8_t  blocks[17][4];   // up to 17 blocks x 4 bytes = 68 bytes
+    uint8_t  num_blocks;      // actual number stored (1-17)
+    uint8_t  reserved[175];   // pad to exactly 256 bytes
+} srt512_sa_dump_t;           // sizeof == 256
+
+// Timeout setter — used by both iso14443b.c and hf_srt512_sa.c
+void iso14b_set_timeout(uint32_t timeout_etu);
+
 #endif /* __ISO14443B_H */

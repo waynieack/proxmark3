@@ -89,6 +89,12 @@
 #include "spiffs.h"
 #endif
 
+#ifdef WITH_STANDALONE_HF_SRT512SA
+// Implemented in armsrc/Standalone/hf_srt512_sa.c (compiled only when standalone is selected)
+bool srt512_sa_config_store(const srt512_sa_config_t *cfg);
+bool srt512_sa_dump_store(const srt512_sa_dump_t *dump);
+#endif
+
 int g_dbglevel = DBG_ERROR;
 uint8_t g_trigger = 0;
 bool g_hf_field_active = false;
@@ -1760,6 +1766,31 @@ static void PacketReceived(PacketCommandNG *packet) {
             SimulateSRT512Tag(uid, blocks, num_blocks, flags, static_chipid);
             break;
         }
+#ifdef WITH_STANDALONE_HF_SRT512SA
+        case CMD_HF_ISO14443B_STANDALONE_CFG: {
+            // payload: srt512_sa_config_t (256 bytes) + srt512_sa_dump_t (256 bytes)
+            if (packet->length < (sizeof(srt512_sa_config_t) + sizeof(srt512_sa_dump_t))) {
+                reply_ng(CMD_HF_ISO14443B_STANDALONE_CFG, PM3_EINVARG, NULL, 0);
+                break;
+            }
+            const srt512_sa_config_t *cfg  = (const srt512_sa_config_t *)packet->data.asBytes;
+            const srt512_sa_dump_t   *dump = (const srt512_sa_dump_t   *)(packet->data.asBytes + sizeof(srt512_sa_config_t));
+            bool ok = srt512_sa_config_store(cfg) && srt512_sa_dump_store(dump);
+            reply_ng(CMD_HF_ISO14443B_STANDALONE_CFG, ok ? PM3_SUCCESS : PM3_EFATAL, NULL, 0);
+            break;
+        }
+        case CMD_HF_ISO14443B_STANDALONE_ERASE: {
+            // Erase both flash pages by writing zeroed structs (magic = 0 → invalid)
+            srt512_sa_config_t blank_cfg;
+            srt512_sa_dump_t   blank_dump;
+            memset(&blank_cfg,  0, sizeof(blank_cfg));
+            memset(&blank_dump, 0, sizeof(blank_dump));
+            srt512_sa_config_store(&blank_cfg);
+            srt512_sa_dump_store(&blank_dump);
+            reply_ng(CMD_HF_ISO14443B_STANDALONE_ERASE, PM3_SUCCESS, NULL, 0);
+            break;
+        }
+#endif /* WITH_STANDALONE_HF_SRT512SA */
         case CMD_HF_ISO14443B_COMMAND: {
             iso14b_raw_cmd_t *payload = (iso14b_raw_cmd_t *)packet->data.asBytes;
             SendRawCommand14443B(payload);
@@ -3402,6 +3433,26 @@ void  __attribute__((noreturn)) AppMain(void) {
     // (AT91F_CDC_Enumerate() will be called in the main loop)
     usb_disable();
     usb_enable();
+
+#ifdef WITH_AUTOBOOTSTANDALONE
+    // Auto-start standalone mode if no USB host enumerates within 1500ms.
+    // Enabled by WITH_AUTOBOOTSTANDALONE (set PLATFORM_EXTRAS+=AUTOBOOTSTANDALONE
+    // in Makefile.platform or pass it on the make command line).
+    // If a USB host enumerates quickly the device falls through to the normal
+    // command loop as usual — no behaviour change when connected to a PC.
+    {
+        uint32_t t_autostart = GetTickCount();
+        while (GetTickCountDelta(t_autostart) < 1500) {
+            WDT_HIT();
+            if (usb_check()) break;  // USB host enumerated — skip auto-start
+        }
+        if (!usb_check()) {
+            allow_send_wtx = false;
+            RunMod();
+            allow_send_wtx = true;
+        }
+    }
+#endif
 
     for (;;) {
         WDT_HIT();
